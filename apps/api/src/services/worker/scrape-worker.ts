@@ -956,9 +956,7 @@ async function processKickoffSitemapJob(job: NuQJob<ScrapeJobKickoffSitemap>) {
 
     const passingURLs = (
       await crawler.filterLinks(
-        [...new Set(results.urls.map(x => x.href))].filter(
-          url => crawler.filterURL(url, sc.originUrl!).allowed,
-        ),
+        results.urls.map(x => x.href),
         Infinity,
         sc.crawlerOptions.maxDepth ?? 10,
         false,
