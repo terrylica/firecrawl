@@ -2,9 +2,21 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, usize};
+use std::{
+  collections::{HashMap, HashSet},
+  sync::LazyLock,
+};
 use texting_robots::Robot;
 use url::Url;
+
+static FILE_EXTENSIONS: &[&str] = &[
+  ".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".ico", ".svg", ".tiff", ".zip", ".exe", ".dmg",
+  ".mp4", ".mp3", ".wav", ".pptx", ".xlsx", ".avi", ".flv", ".woff", ".ttf", ".woff2", ".webp",
+  ".inc",
+];
+
+static FILE_EXT_SET: LazyLock<HashSet<&'static str>> =
+  LazyLock::new(|| FILE_EXTENSIONS.iter().copied().collect());
 
 #[derive(Deserialize)]
 #[napi(object)]
@@ -75,150 +87,126 @@ pub struct SitemapProcessingResult {
   pub total_count: u32,
 }
 
-fn _is_file(url: &Url) -> bool {
-  let file_extensions = vec![
-    ".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".ico", ".svg", ".tiff", ".zip", ".exe",
-    ".dmg", ".mp4", ".mp3", ".wav", ".pptx", ".xlsx", ".avi", ".flv", ".woff", ".ttf", ".woff2",
-    ".webp", ".inc",
-  ];
-  let url_without_query = url.path().to_lowercase();
-  file_extensions
-    .iter()
-    .any(|ext| url_without_query.ends_with(ext))
+const URL_PARSE_ERROR: &str = "URL_PARSE_ERROR";
+const DEPTH_LIMIT: &str = "DEPTH_LIMIT";
+const EXCLUDE_PATTERN: &str = "EXCLUDE_PATTERN";
+const INCLUDE_PATTERN: &str = "INCLUDE_PATTERN";
+const BACKWARD_CRAWLING: &str = "BACKWARD_CRAWLING";
+const ROBOTS_TXT: &str = "ROBOTS_TXT";
+const FILE_TYPE: &str = "FILE_TYPE";
+
+#[inline]
+fn is_file(path: &str) -> bool {
+  if let Some(dot_pos) = path.rfind('.') {
+    let extension = &path[dot_pos..];
+    FILE_EXT_SET.contains(extension)
+  } else {
+    false
+  }
 }
 
-fn _get_url_depth(path: &str) -> u32 {
+#[inline]
+fn get_url_depth(path: &str) -> u32 {
   path
     .split('/')
-    .filter(|x| *x != "" && *x != "index.php" && *x != "index.html")
+    .filter(|segment| !segment.is_empty() && *segment != "index.php" && *segment != "index.html")
     .count() as u32
 }
 
 fn _filter_links(data: FilterLinksCall) -> std::result::Result<FilterLinksResult, String> {
-  let mut denial_reasons = HashMap::new();
-
-  let limit = data
-    .limit
-    .and_then(|x| if x < 0 { Some(0) } else { Some(x as usize) })
-    .unwrap_or(usize::MAX);
-
+  let limit = data.limit.map_or(usize::MAX, |x| x.max(0) as usize);
   if limit == 0 {
     return Ok(FilterLinksResult {
-      links: Vec::with_capacity(0),
-      denial_reasons,
+      links: Vec::new(),
+      denial_reasons: HashMap::new(),
     });
   }
 
-  let base_url = Url::parse(&data.base_url).map_err(|e| format!("Base URL parse error: {}", e))?;
+  let base_url = Url::parse(&data.base_url).map_err(|e| format!("Base URL parse error: {e}"))?;
   let initial_url =
-    Url::parse(&data.initial_url).map_err(|e| format!("Initial URL parse error: {}", e))?;
+    Url::parse(&data.initial_url).map_err(|e| format!("Initial URL parse error: {e}"))?;
+  let initial_path = initial_url.path();
 
-  let excludes_regex = data
+  let excludes_regex: Vec<Regex> = data
     .excludes
     .iter()
-    .map(|exclude| Regex::new(exclude))
-    .collect::<Vec<std::result::Result<Regex, regex::Error>>>();
-  let excludes_regex = excludes_regex
-    .into_iter()
-    .filter_map(|x| x.ok())
-    .collect::<Vec<Regex>>();
-
-  let includes_regex = data
+    .filter_map(|e| Regex::new(e).ok())
+    .collect();
+  let includes_regex: Vec<Regex> = data
     .includes
     .iter()
-    .map(|include| Regex::new(include))
-    .collect::<Vec<std::result::Result<Regex, regex::Error>>>();
-  let includes_regex = includes_regex
-    .into_iter()
-    .filter_map(|x| x.ok())
-    .collect::<Vec<Regex>>();
+    .filter_map(|i| Regex::new(i).ok())
+    .collect();
 
-  let links = data
-    .links
-    .into_iter()
-    .filter(|link| {
-      let url = match base_url.join(link) {
-        Ok(x) => x,
-        Err(_) => {
-          denial_reasons.insert(link.clone(), "URL_PARSE_ERROR".to_string());
-          return false;
-        }
-      };
+  let robot = if !data.ignore_robots_txt && !data.robots_txt.is_empty() {
+    Robot::new("FireCrawlAgent", data.robots_txt.as_bytes())
+      .ok()
+      .or_else(|| Robot::new("FirecrawlAgent", data.robots_txt.as_bytes()).ok())
+  } else {
+    None
+  };
 
-      let path = url.path();
-      let depth = _get_url_depth(path);
-      if depth > data.max_depth {
-        denial_reasons.insert(link.clone(), "DEPTH_LIMIT".to_string());
-        return false;
+  let mut result_links = Vec::new();
+  let mut denial_reasons = HashMap::new();
+
+  for link in data.links {
+    if result_links.len() >= limit {
+      break;
+    }
+
+    let url = match base_url.join(&link) {
+      Ok(url) => url,
+      Err(_) => {
+        denial_reasons.insert(link, URL_PARSE_ERROR.to_string());
+        continue;
       }
+    };
 
-      let exinc_path = if data.regex_on_full_url {
-        url.as_str()
-      } else {
-        url.path()
-      };
+    let path = url.path();
 
-      if !excludes_regex.is_empty()
-        && excludes_regex
-          .iter()
-          .any(|regex| regex.is_match(exinc_path))
-      {
-        denial_reasons.insert(link.clone(), "EXCLUDE_PATTERN".to_string());
-        return false;
+    if get_url_depth(path) > data.max_depth {
+      denial_reasons.insert(link, DEPTH_LIMIT.to_string());
+      continue;
+    }
+
+    if is_file(path) {
+      denial_reasons.insert(link, FILE_TYPE.to_string());
+      continue;
+    }
+
+    if !data.allow_backward_crawling && !path.starts_with(initial_path) {
+      denial_reasons.insert(link, BACKWARD_CRAWLING.to_string());
+      continue;
+    }
+
+    let match_target = if data.regex_on_full_url {
+      url.as_str()
+    } else {
+      path
+    };
+
+    if !excludes_regex.is_empty() && excludes_regex.iter().any(|r| r.is_match(match_target)) {
+      denial_reasons.insert(link, EXCLUDE_PATTERN.to_string());
+      continue;
+    }
+
+    if !includes_regex.is_empty() && !includes_regex.iter().any(|r| r.is_match(match_target)) {
+      denial_reasons.insert(link, INCLUDE_PATTERN.to_string());
+      continue;
+    }
+
+    if let Some(ref robot) = robot {
+      if !robot.allowed(url.as_str()) {
+        denial_reasons.insert(link, ROBOTS_TXT.to_string());
+        continue;
       }
+    }
 
-      if !includes_regex.is_empty()
-        && !includes_regex
-          .iter()
-          .any(|regex| regex.is_match(exinc_path))
-      {
-        denial_reasons.insert(link.clone(), "INCLUDE_PATTERN".to_string());
-        return false;
-      }
-
-      if !data.allow_backward_crawling {
-        if !url.path().starts_with(initial_url.path()) {
-          denial_reasons.insert(link.clone(), "BACKWARD_CRAWLING".to_string());
-          return false;
-        }
-      }
-
-      if !data.ignore_robots_txt {
-        match Robot::new("FireCrawlAgent", data.robots_txt.as_bytes()) {
-          Ok(robot) => {
-            let allowed = robot.allowed(url.as_str());
-            if !allowed {
-              match Robot::new("FirecrawlAgent", data.robots_txt.as_bytes()) {
-                Ok(robot_alt) => {
-                  let allowed_alt = robot_alt.allowed(url.as_str());
-                  if !allowed_alt {
-                    denial_reasons.insert(link.clone(), "ROBOTS_TXT".to_string());
-                    return false;
-                  }
-                }
-                Err(_) => {
-                  denial_reasons.insert(link.clone(), "ROBOTS_TXT".to_string());
-                  return false;
-                }
-              }
-            }
-          }
-          Err(_) => {}
-        }
-      }
-
-      if _is_file(&url) {
-        denial_reasons.insert(link.clone(), "FILE_TYPE".to_string());
-        return false;
-      }
-
-      true
-    })
-    .take(limit)
-    .collect::<Vec<_>>();
+    result_links.push(link);
+  }
 
   Ok(FilterLinksResult {
-    links,
+    links: result_links,
     denial_reasons,
   })
 }
@@ -227,7 +215,7 @@ fn _filter_links(data: FilterLinksCall) -> std::result::Result<FilterLinksResult
 #[napi]
 pub fn filter_links(data: FilterLinksCall) -> Result<FilterLinksResult> {
   _filter_links(data)
-    .map_err(|e| Error::new(Status::GenericFailure, format!("Filter links error: {}", e)))
+    .map_err(|e| Error::new(Status::GenericFailure, format!("Filter links error: {e}")))
 }
 
 fn _parse_sitemap_xml(xml_content: &str) -> std::result::Result<ParsedSitemap, String> {
@@ -238,28 +226,24 @@ fn _parse_sitemap_xml(xml_content: &str) -> std::result::Result<ParsedSitemap, S
       ..Default::default()
     },
   )
-  .map_err(|e| format!("XML parsing error: {}", e))?;
+  .map_err(|e| format!("XML parsing error: {e}"))?;
   let root = doc.root_element();
 
   match root.tag_name().name() {
     "sitemapindex" => {
-      let mut sitemaps = Vec::new();
-
-      for sitemap_node in root
+      let sitemaps = root
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "sitemap")
-      {
-        if let Some(loc_node) = sitemap_node
-          .children()
-          .find(|n| n.is_element() && n.tag_name().name() == "loc")
-        {
-          if let Some(loc_text) = loc_node.text() {
-            sitemaps.push(SitemapEntry {
+        .filter_map(|sitemap_node| {
+          sitemap_node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "loc")
+            .and_then(|loc_node| loc_node.text())
+            .map(|loc_text| SitemapEntry {
               loc: vec![loc_text.to_string()],
-            });
-          }
-        }
-      }
+            })
+        })
+        .collect();
 
       Ok(ParsedSitemap {
         urlset: None,
@@ -267,23 +251,19 @@ fn _parse_sitemap_xml(xml_content: &str) -> std::result::Result<ParsedSitemap, S
       })
     }
     "urlset" => {
-      let mut urls = Vec::new();
-
-      for url_node in root
+      let urls = root
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "url")
-      {
-        if let Some(loc_node) = url_node
-          .children()
-          .find(|n| n.is_element() && n.tag_name().name() == "loc")
-        {
-          if let Some(loc_text) = loc_node.text() {
-            urls.push(SitemapUrl {
+        .filter_map(|url_node| {
+          url_node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "loc")
+            .and_then(|loc_node| loc_node.text())
+            .map(|loc_text| SitemapUrl {
               loc: vec![loc_text.to_string()],
-            });
-          }
-        }
-      }
+            })
+        })
+        .collect();
 
       Ok(ParsedSitemap {
         urlset: Some(SitemapUrlset { url: urls }),
@@ -300,7 +280,7 @@ pub fn parse_sitemap_xml(xml_content: String) -> Result<ParsedSitemap> {
   _parse_sitemap_xml(&xml_content).map_err(|e| {
     Error::new(
       Status::GenericFailure,
-      format!("Parse sitemap XML error: {}", e),
+      format!("Parse sitemap XML error: {e}"),
     )
   })
 }
@@ -324,12 +304,13 @@ fn _process_sitemap(xml_content: &str) -> std::result::Result<SitemapProcessingR
       .collect();
 
     if !sitemap_urls.is_empty() {
+      let count = sitemap_urls.len() as u32;
       instructions.push(SitemapInstruction {
         action: "recurse".to_string(),
-        urls: sitemap_urls.clone(),
-        count: sitemap_urls.len() as u32,
+        urls: sitemap_urls,
+        count,
       });
-      total_count += sitemap_urls.len() as u32;
+      total_count += count;
     }
   } else if let Some(urlset) = parsed.urlset {
     let mut xml_sitemaps = Vec::new();
@@ -338,10 +319,12 @@ fn _process_sitemap(xml_content: &str) -> std::result::Result<SitemapProcessingR
     for url_entry in urlset.url {
       if !url_entry.loc.is_empty() {
         let url = url_entry.loc[0].trim();
-        if url.to_lowercase().ends_with(".xml") || url.to_lowercase().ends_with(".xml.gz") {
+        let url_lower = url.to_lowercase();
+        if url_lower.ends_with(".xml") || url_lower.ends_with(".xml.gz") {
           xml_sitemaps.push(url.to_string());
         } else if let Ok(parsed_url) = Url::parse(url) {
-          if !_is_file(&parsed_url) {
+          let path_lower = parsed_url.path().to_lowercase();
+          if !is_file(&path_lower) {
             valid_urls.push(url.to_string());
           }
         }
@@ -349,21 +332,23 @@ fn _process_sitemap(xml_content: &str) -> std::result::Result<SitemapProcessingR
     }
 
     if !xml_sitemaps.is_empty() {
+      let count = xml_sitemaps.len() as u32;
       instructions.push(SitemapInstruction {
         action: "recurse".to_string(),
-        urls: xml_sitemaps.clone(),
-        count: xml_sitemaps.len() as u32,
+        urls: xml_sitemaps,
+        count,
       });
-      total_count += xml_sitemaps.len() as u32;
+      total_count += count;
     }
 
     if !valid_urls.is_empty() {
+      let count = valid_urls.len() as u32;
       instructions.push(SitemapInstruction {
         action: "process".to_string(),
-        urls: valid_urls.clone(),
-        count: valid_urls.len() as u32,
+        urls: valid_urls,
+        count,
       });
-      total_count += valid_urls.len() as u32;
+      total_count += count;
     }
   }
 
@@ -379,7 +364,7 @@ pub fn process_sitemap(xml_content: String) -> Result<SitemapProcessingResult> {
   _process_sitemap(&xml_content).map_err(|e| {
     Error::new(
       Status::GenericFailure,
-      format!("Process sitemap error: {}", e),
+      format!("Process sitemap error: {e}"),
     )
   })
 }
@@ -445,10 +430,7 @@ mod tests {
 
     let result = _parse_sitemap_xml(xml_content);
     assert!(result.is_err());
-    assert!(result
-      .unwrap_err()
-      .to_string()
-      .contains("Invalid sitemap format"));
+    assert!(result.unwrap_err().contains("Invalid sitemap format"));
   }
 
   #[test]
@@ -636,5 +618,14 @@ mod tests {
     let result = result.unwrap();
     assert_eq!(result.links.len(), 1);
     assert_eq!(result.links[0], "https://example.com/test");
+  }
+
+  #[test]
+  fn test_is_file() {
+    assert!(is_file("test.png"));
+    assert!(is_file("script.js"));
+    assert!(is_file("style.css"));
+    assert!(!is_file("page"));
+    assert!(!is_file("directory/"));
   }
 }

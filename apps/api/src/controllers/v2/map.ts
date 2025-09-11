@@ -45,16 +45,19 @@ interface MapResult {
 }
 
 function dedupeMapDocumentArray(documents: MapDocument[]): MapDocument[] {
-  let urlSet = new Set<string>(documents.map(x => x.url));
+  const urlMap = new Map<string, MapDocument>();
 
-  let newDocuments: MapDocument[] = [
-    ...Array.from(urlSet).map(x => {
-      let localDocs = documents.filter(y => y.url === x);
-      return localDocs.find(x => x.title !== undefined) || localDocs[0];
-    }),
-  ];
+  for (const doc of documents) {
+    const existing = urlMap.get(doc.url);
 
-  return newDocuments;
+    if (!existing) {
+      urlMap.set(doc.url, doc);
+    } else if (doc.title !== undefined && existing.title === undefined) {
+      urlMap.set(doc.url, doc);
+    }
+  }
+
+  return Array.from(urlMap.values());
 }
 
 async function queryIndex(
@@ -116,10 +119,15 @@ async function getMapResults({
   useIndex?: boolean;
   location?: ScrapeOptions["location"];
 }): Promise<MapResult> {
+  const functionStartTime = process.hrtime();
+  console.log("Starting getMapResults function");
+
   const id = uuidv4();
   let mapResults: MapDocument[] = [];
   const zeroDataRetention = flags?.forceZDR ?? false;
 
+  // Setup phase timing
+  const setupStartTime = process.hrtime();
   const sc: StoredCrawl = {
     originUrl: url,
     crawlerOptions: {
@@ -137,14 +145,38 @@ async function getMapResults({
   };
 
   const crawler = crawlToCrawler(id, sc, flags);
+  const setupTime = process.hrtime(setupStartTime);
+  console.log(
+    "Setup phase completed:",
+    (setupTime[0] * 1000 + setupTime[1] / 1000000).toFixed(2),
+    "ms",
+  );
 
+  // Robots.txt phase timing
+  const robotsStartTime = process.hrtime();
   try {
     sc.robots = await crawler.getRobotsTxt(false, abort);
     crawler.importRobotsTxt(sc.robots);
-  } catch (_) {}
+    const robotsTime = process.hrtime(robotsStartTime);
+    console.log(
+      "Robots.txt fetch completed:",
+      (robotsTime[0] * 1000 + robotsTime[1] / 1000000).toFixed(2),
+      "ms",
+    );
+  } catch (_) {
+    const robotsTime = process.hrtime(robotsStartTime);
+    console.log(
+      "Robots.txt fetch failed:",
+      (robotsTime[0] * 1000 + robotsTime[1] / 1000000).toFixed(2),
+      "ms",
+    );
+  }
 
   // If sitemapOnly is true, only get links from sitemap
   if (crawlerOptions.sitemap === "only") {
+    const sitemapOnlyStartTime = process.hrtime();
+    console.log("Starting sitemap-only processing");
+
     const sitemap = await crawler.tryGetSitemap(
       urls => {
         urls.forEach(x => {
@@ -159,7 +191,9 @@ async function getMapResults({
       abort,
       crawlerOptions.useMock,
     );
+
     if (sitemap > 0) {
+      const urlProcessingStartTime = process.hrtime();
       mapResults = mapResults
         .slice(1)
         .map(x => {
@@ -173,10 +207,27 @@ async function getMapResults({
           }
         })
         .filter(x => x !== null) as MapDocument[];
+      const urlProcessingTime = process.hrtime(urlProcessingStartTime);
+      console.log(
+        "URL processing completed:",
+        (urlProcessingTime[0] * 1000 + urlProcessingTime[1] / 1000000).toFixed(
+          2,
+        ),
+        "ms",
+      );
     }
-  } else {
-    let urlWithoutWww = url.replace("www.", "");
 
+    const sitemapOnlyTime = process.hrtime(sitemapOnlyStartTime);
+    console.log(
+      "Sitemap-only processing completed:",
+      (sitemapOnlyTime[0] * 1000 + sitemapOnlyTime[1] / 1000000).toFixed(2),
+      "ms",
+    );
+  } else {
+    const searchProcessingStartTime = process.hrtime();
+    console.log("Starting search and sitemap processing");
+
+    let urlWithoutWww = url.replace("www.", "");
     let mapUrl =
       search && allowExternalLinks
         ? `${search} ${urlWithoutWww}`
@@ -189,16 +240,33 @@ async function getMapResults({
       Math.min(MAX_FIRE_ENGINE_RESULTS, limit) / resultsPerPage,
     );
 
+    // Cache check timing
+    const cacheCheckStartTime = process.hrtime();
     const cacheKey = `fireEngineMap:${mapUrl}`;
     const cachedResult = await redisEvictConnection.get(cacheKey);
+    const cacheCheckTime = process.hrtime(cacheCheckStartTime);
+    console.log(
+      "Cache check completed:",
+      (cacheCheckTime[0] * 1000 + cacheCheckTime[1] / 1000000).toFixed(2),
+      "ms",
+    );
 
     let pagePromises: (Promise<any> | any)[];
 
     if (cachedResult) {
+      const cacheParseStartTime = process.hrtime();
       pagePromises = JSON.parse(cachedResult);
+      const cacheParseTime = process.hrtime(cacheParseStartTime);
+      console.log(
+        "Cache parsing completed:",
+        (cacheParseTime[0] * 1000 + cacheParseTime[1] / 1000000).toFixed(2),
+        "ms",
+      );
     } else {
+      const fetchPagesSetupStartTime = process.hrtime();
       const fetchPage = async (page: number) => {
-        return fireEngineMap(
+        const pageStartTime = process.hrtime();
+        const result = await fireEngineMap(
           mapUrl,
           {
             numResults: resultsPerPage,
@@ -206,35 +274,82 @@ async function getMapResults({
           },
           abort,
         );
+        const pageTime = process.hrtime(pageStartTime);
+        console.log(
+          `Page ${page} fetch completed:`,
+          (pageTime[0] * 1000 + pageTime[1] / 1000000).toFixed(2),
+          "ms",
+        );
+        return result;
       };
 
       pagePromises = Array.from({ length: maxPages }, (_, i) =>
         fetchPage(i + 1),
       );
+      const fetchPagesSetupTime = process.hrtime(fetchPagesSetupStartTime);
+      console.log(
+        "Fire engine setup completed:",
+        (
+          fetchPagesSetupTime[0] * 1000 +
+          fetchPagesSetupTime[1] / 1000000
+        ).toFixed(2),
+        "ms",
+      );
     }
 
-    // Parallelize sitemap index query with search results
+    // Parallel operations timing
+    const parallelStartTime = process.hrtime();
+    console.log("Starting parallel operations (index query + search results)");
+
     const [indexResults, searchResults] = await Promise.all([
       queryIndex(url, limit, useIndex, includeSubdomains),
       Promise.all(pagePromises),
     ]);
+    const parallelTime = process.hrtime(parallelStartTime);
+    console.log(
+      "Parallel operations completed:",
+      (parallelTime[0] * 1000 + parallelTime[1] / 1000000).toFixed(2),
+      "ms",
+    );
 
+    // Cache storage timing
     if (!zeroDataRetention) {
+      const cacheStoreStartTime = process.hrtime();
       await redisEvictConnection.set(
         cacheKey,
         JSON.stringify(searchResults),
         "EX",
         48 * 60 * 60,
       ); // Cache for 48 hours
+      const cacheStoreTime = process.hrtime(cacheStoreStartTime);
+      console.log(
+        "Cache storage completed:",
+        (cacheStoreTime[0] * 1000 + cacheStoreTime[1] / 1000000).toFixed(2),
+        "ms",
+      );
     }
 
+    // Index results processing timing
     if (indexResults.length > 0) {
+      const indexProcessingStartTime = process.hrtime();
       mapResults.push(...indexResults);
+      const indexProcessingTime = process.hrtime(indexProcessingStartTime);
+      console.log(
+        "Index results processing completed:",
+        (
+          indexProcessingTime[0] * 1000 +
+          indexProcessingTime[1] / 1000000
+        ).toFixed(2),
+        "ms",
+        `(${indexResults.length} results)`,
+      );
     }
 
-    // If sitemap is not ignored, fetch sitemap
-    // This will attempt to find it in the index at first, or fetch a fresh one if it's older than 2 days
+    // Sitemap processing timing
     if (crawlerOptions.sitemap === "include") {
+      const sitemapStartTime = process.hrtime();
+      console.log("Starting sitemap processing");
+
       try {
         await crawler.tryGetSitemap(
           urls => {
@@ -249,12 +364,27 @@ async function getMapResults({
           crawlerOptions.timeout ?? 30000,
           abort,
         );
+        const sitemapTime = process.hrtime(sitemapStartTime);
+        console.log(
+          "Sitemap processing completed:",
+          (sitemapTime[0] * 1000 + sitemapTime[1] / 1000000).toFixed(2),
+          "ms",
+        );
       } catch (e) {
+        const sitemapTime = process.hrtime(sitemapStartTime);
+        console.log(
+          "Sitemap processing failed:",
+          (sitemapTime[0] * 1000 + sitemapTime[1] / 1000000).toFixed(2),
+          "ms",
+        );
         logger.warn("tryGetSitemap threw an error", { error: e });
       }
     }
 
+    // Results merging timing
+    const mergingStartTime = process.hrtime();
     if (search) {
+      console.log("Merging search results");
       mapResults = searchResults
         .flat()
         .map<MapDocument>(
@@ -267,6 +397,7 @@ async function getMapResults({
         )
         .concat(mapResults);
     } else {
+      console.log("Concatenating map results");
       mapResults = mapResults.concat(
         searchResults.flat().map(x => ({
           url: x.url,
@@ -275,76 +406,207 @@ async function getMapResults({
         })),
       );
     }
+    const mergingTime = process.hrtime(mergingStartTime);
+    console.log(
+      "Results merging completed:",
+      (mergingTime[0] * 1000 + mergingTime[1] / 1000000).toFixed(2),
+      "ms",
+      `(${mapResults.length} total results)`,
+    );
 
+    // Limit cutoff timing
+    const cutoffStartTime = process.hrtime();
     const minumumCutoff = Math.min(MAX_MAP_LIMIT, limit);
     if (mapResults.length > minumumCutoff) {
       mapResults = mapResults.slice(0, minumumCutoff);
+      const cutoffTime = process.hrtime(cutoffStartTime);
+      console.log(
+        "Results cutoff applied:",
+        (cutoffTime[0] * 1000 + cutoffTime[1] / 1000000).toFixed(2),
+        "ms",
+        `(limited to ${minumumCutoff})`,
+      );
     }
 
+    // Cosine similarity timing
     if (search) {
+      const similarityStartTime = process.hrtime();
       const searchQuery = search.toLowerCase();
       mapResults = performCosineSimilarityV2(mapResults, searchQuery);
+      const similarityTime = process.hrtime(similarityStartTime);
+      console.log(
+        "Cosine similarity processing completed:",
+        (similarityTime[0] * 1000 + similarityTime[1] / 1000000).toFixed(2),
+        "ms",
+      );
     }
 
-    mapResults = mapResults
-      .map(x => {
-        try {
-          return {
-            ...x,
-            url: checkAndUpdateURLForMap(
-              x.url,
-              crawlerOptions.ignoreQueryParameters ?? true,
-            ).url.trim(),
-          };
-        } catch (_) {
-          return null;
-        }
-      })
-      .filter(x => x !== null) as MapDocument[];
-
-    // allows for subdomains to be included
-    mapResults = mapResults.filter(x => isSameDomain(x.url, url));
-
-    // if includeSubdomains is false, filter out subdomains
-    if (!includeSubdomains) {
-      mapResults = mapResults.filter(x => isSameSubdomain(x.url, url));
-    }
-
-    // Filter by path if enabled
-    if (filterByPath && !allowExternalLinks) {
-      try {
-        const urlObj = new URL(url);
-        const urlPath = urlObj.pathname;
-        // Only apply path filtering if the URL has a significant path (not just '/' or empty)
-        // This means we only filter by path if the user has not selected a root domain
-        if (urlPath && urlPath !== "/" && urlPath.length > 1) {
-          mapResults = mapResults.filter(x => {
-            try {
-              const linkObj = new URL(x.url);
-              return linkObj.pathname.startsWith(urlPath);
-            } catch (e) {
-              return false;
-            }
-          });
-        }
-      } catch (e) {
-        // If URL parsing fails, continue without path filtering
-        logger.warn(`Failed to parse URL for path filtering: ${url}`, {
-          error: e,
-        });
-      }
-    }
-
-    mapResults = dedupeMapDocumentArray(mapResults);
+    const searchProcessingTime = process.hrtime(searchProcessingStartTime);
+    console.log(
+      "Search and sitemap processing completed:",
+      (
+        searchProcessingTime[0] * 1000 +
+        searchProcessingTime[1] / 1000000
+      ).toFixed(2),
+      "ms",
+    );
   }
 
+  // Filtering phase timing
+  const filteringStartTime = process.hrtime();
+  console.log("Starting filtering phase");
+
+  // URL validation timing
+  const urlValidationStartTime = process.hrtime();
+  mapResults = mapResults
+    .map(x => {
+      try {
+        return {
+          ...x,
+          url: checkAndUpdateURLForMap(
+            x.url,
+            crawlerOptions.ignoreQueryParameters ?? true,
+          ).url.trim(),
+        };
+      } catch (_) {
+        return null;
+      }
+    })
+    .filter(x => x !== null) as MapDocument[];
+  const urlValidationTime = process.hrtime(urlValidationStartTime);
+  console.log(
+    "URL validation completed:",
+    (urlValidationTime[0] * 1000 + urlValidationTime[1] / 1000000).toFixed(2),
+    "ms",
+  );
+
+  // Domain filtering timing
+  const domainFilteringStartTime = process.hrtime();
+  mapResults = mapResults.filter(x => isSameDomain(x.url, url));
+  const domainFilteringTime = process.hrtime(domainFilteringStartTime);
+  console.log(
+    "Domain filtering completed:",
+    (domainFilteringTime[0] * 1000 + domainFilteringTime[1] / 1000000).toFixed(
+      2,
+    ),
+    "ms",
+    `(${mapResults.length} results remaining)`,
+  );
+
+  // Subdomain filtering timing
+  if (!includeSubdomains) {
+    const subdomainFilteringStartTime = process.hrtime();
+    mapResults = mapResults.filter(x => isSameSubdomain(x.url, url));
+    const subdomainFilteringTime = process.hrtime(subdomainFilteringStartTime);
+    console.log(
+      "Subdomain filtering completed:",
+      (
+        subdomainFilteringTime[0] * 1000 +
+        subdomainFilteringTime[1] / 1000000
+      ).toFixed(2),
+      "ms",
+      `(${mapResults.length} results remaining)`,
+    );
+  }
+
+  // Path filtering timing
+  if (filterByPath && !allowExternalLinks) {
+    const pathFilteringStartTime = process.hrtime();
+    try {
+      const urlObj = new URL(url);
+      const urlPath = urlObj.pathname;
+      // Only apply path filtering if the URL has a significant path (not just '/' or empty)
+      // This means we only filter by path if the user has not selected a root domain
+      if (urlPath && urlPath !== "/" && urlPath.length > 1) {
+        const beforeCount = mapResults.length;
+        mapResults = mapResults.filter(x => {
+          try {
+            const linkObj = new URL(x.url);
+            return linkObj.pathname.startsWith(urlPath);
+          } catch (e) {
+            return false;
+          }
+        });
+        const pathFilteringTime = process.hrtime(pathFilteringStartTime);
+        console.log(
+          "Path filtering completed:",
+          (
+            pathFilteringTime[0] * 1000 +
+            pathFilteringTime[1] / 1000000
+          ).toFixed(2),
+          "ms",
+          `(${beforeCount} -> ${mapResults.length} results)`,
+        );
+      } else {
+        const pathFilteringTime = process.hrtime(pathFilteringStartTime);
+        console.log(
+          "Path filtering skipped (root domain):",
+          (
+            pathFilteringTime[0] * 1000 +
+            pathFilteringTime[1] / 1000000
+          ).toFixed(2),
+          "ms",
+        );
+      }
+    } catch (e) {
+      // If URL parsing fails, continue without path filtering
+      const pathFilteringTime = process.hrtime(pathFilteringStartTime);
+      console.log(
+        "Path filtering failed:",
+        (pathFilteringTime[0] * 1000 + pathFilteringTime[1] / 1000000).toFixed(
+          2,
+        ),
+        "ms",
+      );
+      logger.warn(`Failed to parse URL for path filtering: ${url}`, {
+        error: e,
+      });
+    }
+  }
+
+  // Deduplication timing
+  const dedupeStartTime = process.hrtime();
+  mapResults = dedupeMapDocumentArray(mapResults);
+  const dedupeTime = process.hrtime(dedupeStartTime);
+  console.log(
+    "Deduplication completed:",
+    (dedupeTime[0] * 1000 + dedupeTime[1] / 1000000).toFixed(2),
+    "ms",
+    `(${mapResults.length} unique results)`,
+  );
+
+  const filteringTime = process.hrtime(filteringStartTime);
+  console.log(
+    "Filtering phase completed:",
+    (filteringTime[0] * 1000 + filteringTime[1] / 1000000).toFixed(2),
+    "ms",
+  );
+
+  // Final limit application timing
+  const finalLimitStartTime = process.hrtime();
   mapResults = mapResults.slice(0, limit);
+  const finalLimitTime = process.hrtime(finalLimitStartTime);
+  console.log(
+    "Final limit applied:",
+    (finalLimitTime[0] * 1000 + finalLimitTime[1] / 1000000).toFixed(2),
+    "ms",
+    `(${mapResults.length} final results)`,
+  );
+
+  const totalFunctionTime = process.hrtime(functionStartTime);
+  const totalTimeMs =
+    totalFunctionTime[0] * 1000 + totalFunctionTime[1] / 1000000;
+  console.log(
+    "getMapResults function completed:",
+    totalTimeMs.toFixed(2),
+    "ms",
+  );
 
   return {
     success: true,
     mapResults,
     job_id: id,
-    time_taken: (new Date().getTime() - Date.now()) / 1000,
+    time_taken: totalTimeMs / 1000, // Convert to seconds
   };
 }
 
