@@ -140,7 +140,13 @@ const DEFAULT_PORT = process.env.PORT ?? 3002;
 const HOST = process.env.HOST ?? "localhost";
 
 async function startServer(port = DEFAULT_PORT) {
-  await initializeBlocklist();
+  try {
+    await initializeBlocklist();
+  } catch (error) {
+    logger.error("Failed to initialize blocklist", { error });
+    throw error;
+  }
+  
   // Attach WebSocket proxy to the Express app
   attachWsProxy(app);
 
@@ -177,7 +183,10 @@ async function startServer(port = DEFAULT_PORT) {
 }
 
 if (require.main === module) {
-  startServer();
+  startServer().catch(error => {
+    logger.error("Failed to start server", { error });
+    process.exit(1);
+  });
 }
 
 app.get("/is-production", (req, res) => {
