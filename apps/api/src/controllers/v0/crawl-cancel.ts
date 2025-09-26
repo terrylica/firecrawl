@@ -61,7 +61,7 @@ export async function crawlCancelController(req: Request, res: Response) {
       const isCompleted = await isCrawlFinished(req.params.jobId);
       if (isCompleted) {
         return res.status(409).json({
-          error: "Cannot cancel job that has already completed",
+          error: "Crawl job already completed",
         });
       }
     } catch (error) {
