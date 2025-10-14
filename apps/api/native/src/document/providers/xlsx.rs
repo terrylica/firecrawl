@@ -74,24 +74,12 @@ fn data_type_to_string(cell: &Data) -> String {
   match cell {
     Data::Empty => String::new(),
     Data::String(s) => s.clone(),
-    Data::Float(f) => {
-      // Trim trailing ".0" for integers represented as floats
-      let s = f.to_string();
-      if s.ends_with(".0") {
-        s.trim_end_matches(".0").to_string()
-      } else {
-        s
-      }
-    }
+    Data::Float(f) => f.to_string(),
     Data::Int(i) => i.to_string(),
-    Data::Bool(b) => {
-      if *b { "true".to_string() } else { "false".to_string() }
-    }
+    Data::Bool(b) => b.to_string(),
     Data::DateTime(v) => v.to_string(),
     Data::DateTimeIso(v) => v.to_string(),
     Data::DurationIso(v) => v.to_string(),
     Data::Error(e) => format!("#ERROR({e:?})"),
   }
 }
-
-
