@@ -1510,7 +1510,8 @@ export const searchRequestSchema = z
   )
   .refine(x => waitForRefine(x.scrapeOptions), waitForRefineOpts)
   .transform(x => {
-    const country = x.location ? undefined : (x.country ?? "us");
+    const country =
+      x.country !== undefined ? x.country : x.location ? undefined : "us";
 
     // Transform string array sources to object format
     let sources = x.sources;
