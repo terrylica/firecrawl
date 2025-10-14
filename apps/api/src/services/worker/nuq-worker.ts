@@ -1,10 +1,87 @@
 import "dotenv/config";
 import { logger as _logger } from "../../lib/logger";
 import { processJobInternal } from "./scrape-worker";
-import { scrapeQueue, nuqGetLocalMetrics, nuqHealthCheck } from "./nuq";
+import { scrapeQueue, nuqGetLocalMetrics, nuqHealthCheck, NuQJob } from "./nuq";
 import Express from "express";
 import { _ } from "ajv";
 import { initializeBlocklist } from "../../scraper/WebScraper/utils/blocklist";
+import { ScrapeJobData } from "../../types";
+
+import { Document } from "../../controllers/v2/types";
+import { NuQRabbitJobResult, rabbit } from "./queue/nuq-rabbit";
+
+async function runRabbitScrapeJob(
+  job: NuQJob<ScrapeJobData, Document | null>,
+): Promise<NuQRabbitJobResult> {
+  const logger = _logger.child({
+    module: "nuq-worker",
+    scrapeId: job.id,
+    zeroDataRetention: job.data?.zeroDataRetention ?? false,
+  });
+
+  logger.info("Acquired NuQ Rabbit job", { jobId: job.id });
+
+  let processResult:
+    | { ok: true; data: Awaited<ReturnType<typeof processJobInternal>> }
+    | { ok: false; error: any };
+
+  try {
+    processResult = { ok: true, data: await processJobInternal(job) };
+  } catch (error) {
+    processResult = { ok: false, error };
+  }
+
+  return {
+    status: processResult.ok ? "completed" : "failed",
+    result: "data" in processResult ? processResult.data : undefined,
+    failedReason: "error" in processResult ? processResult.error : undefined,
+  } satisfies NuQRabbitJobResult;
+}
+
+async function startRabbitWorker(signal: AbortSignal) {
+  await rabbit.start();
+
+  const prefetchCount = Number(process.env.NUQ_RABBITMQ_PREFETCH_COUNT) || 10;
+  while (!signal.aborted) {
+    const queue = rabbit.subscribe({
+      prefetchCount,
+      signal,
+    });
+
+    const inflightJobs = new Set<Promise<void>>();
+    const trackJob = (p: Promise<void>) => {
+      inflightJobs.add(p);
+      p.finally(() => inflightJobs.delete(p)).catch(error => {
+        _logger.error("Uncaught error in job", { error });
+      });
+    };
+
+    try {
+      for await (const job of queue) {
+        const p = job.run(async job => {
+          return await runRabbitScrapeJob(job);
+        });
+        trackJob(p);
+
+        if (inflightJobs.size >= prefetchCount) {
+          await Promise.race(inflightJobs);
+        }
+      }
+    } catch (error) {
+      _logger.error("Error in NuQ RabbitMQ worker", error);
+    } finally {
+      await queue.return().catch(() => {});
+      await Promise.allSettled(inflightJobs);
+
+      if (!signal.aborted) {
+        _logger.info("Resubscribing to NuQ RabbitMQ queue");
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+  }
+
+  await rabbit.stop();
+}
 
 (async () => {
   try {
@@ -15,6 +92,7 @@ import { initializeBlocklist } from "../../scraper/WebScraper/utils/blocklist";
   }
 
   let isShuttingDown = false;
+  const abortController = new AbortController();
 
   const app = Express();
 
@@ -38,10 +116,21 @@ import { initializeBlocklist } from "../../scraper/WebScraper/utils/blocklist";
 
   function shutdown() {
     isShuttingDown = true;
+    abortController.abort();
   }
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  if (process.env.NUQ_RABBITMQ_URL) {
+    _logger.info("Starting NuQ RabbitMQ worker");
+    startRabbitWorker(abortController.signal).catch(error => {
+      _logger.error("Unhandled error in NuQ RabbitMQ worker", { error });
+    });
+  }
+
+  // keeping legacy for now until everything is migrated to purely rabbit-based queues
+  _logger.info("Starting NuQ polling worker");
 
   let noJobTimeout = 1500;
 

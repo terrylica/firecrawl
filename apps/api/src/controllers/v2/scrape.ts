@@ -12,7 +12,7 @@ import { addScrapeJob, waitForJob } from "../../services/queue-jobs";
 import { getJobPriority } from "../../lib/job-priority";
 import { hasFormatOfType } from "../../lib/format-utils";
 import { TransportableError } from "../../lib/error";
-import { scrapeQueue } from "../../services/worker/nuq";
+import { isRabbitQueue, scrapeQueue } from "../../services/worker/nuq";
 import { checkPermissions } from "../../lib/permissions";
 import { withSpan, setSpanAttributes, SpanKind } from "../../lib/otel-tracer";
 
@@ -112,54 +112,6 @@ export async function scrapeController(
         basePriority: 10,
       });
 
-      // Job enqueuing span
-      const job = await withSpan(
-        "api.scrape.enqueue_job",
-        async enqueueSpan => {
-          const result = await addScrapeJob(
-            {
-              url: req.body.url,
-              mode: "single_urls",
-              team_id: req.auth.team_id,
-              scrapeOptions: {
-                ...req.body,
-                ...(req.body.__experimental_cache
-                  ? {
-                      maxAge: req.body.maxAge ?? 4 * 60 * 60 * 1000, // 4 hours
-                    }
-                  : {}),
-              },
-              internalOptions: {
-                teamId: req.auth.team_id,
-                saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME
-                  ? true
-                  : false,
-                unnormalizedSourceURL: preNormalizedBody.url,
-                bypassBilling: isDirectToBullMQ,
-                zeroDataRetention,
-                teamFlags: req.acuc?.flags ?? null,
-              },
-              origin,
-              integration: req.body.integration,
-              startTime: controllerStartTime,
-              zeroDataRetention,
-              apiKeyId: req.acuc?.api_key_id ?? null,
-            },
-            jobId,
-            jobPriority,
-            isDirectToBullMQ,
-            true,
-          );
-
-          setSpanAttributes(enqueueSpan, {
-            "job.priority": jobPriority,
-            "job.direct_to_bullmq": isDirectToBullMQ,
-          });
-
-          return result;
-        },
-      );
-
       const totalWait =
         (req.body.waitFor ?? 0) +
         (req.body.actions ?? []).reduce(
@@ -167,28 +119,88 @@ export async function scrapeController(
           0,
         );
 
-      let doc: Document;
+      let doc: Document | null = null;
+
       try {
-        // Wait for job completion span
-        doc = await withSpan("api.scrape.wait_for_job", async waitSpan => {
-          setSpanAttributes(waitSpan, {
-            "wait.timeout": timeout !== undefined ? timeout + totalWait : null,
-            "wait.job_id": jobId,
+        // Job enqueuing span
+        // note: for rabbit jobs this will wait for the job to complete
+        // and the result will be in `job.returnvalue` if it was a success
+        const job = await withSpan(
+          "api.scrape.enqueue_job",
+          async enqueueSpan => {
+            setSpanAttributes(enqueueSpan, {
+              "job.priority": jobPriority,
+              "job.direct_to_bullmq": isDirectToBullMQ,
+              "job.timeout": timeout !== undefined ? timeout + totalWait : null,
+              "job.queue": isRabbitQueue ? "rabbit" : "legacy",
+            });
+
+            const result = await addScrapeJob(
+              {
+                url: req.body.url,
+                mode: "single_urls",
+                team_id: req.auth.team_id,
+                scrapeOptions: {
+                  ...req.body,
+                  ...(req.body.__experimental_cache
+                    ? {
+                        maxAge: req.body.maxAge ?? 4 * 60 * 60 * 1000, // 4 hours
+                      }
+                    : {}),
+                },
+                internalOptions: {
+                  teamId: req.auth.team_id,
+                  saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME
+                    ? true
+                    : false,
+                  unnormalizedSourceURL: preNormalizedBody.url,
+                  bypassBilling: isDirectToBullMQ,
+                  zeroDataRetention,
+                  teamFlags: req.acuc?.flags ?? null,
+                },
+                origin,
+                integration: req.body.integration,
+                startTime: controllerStartTime,
+                zeroDataRetention,
+                apiKeyId: req.acuc?.api_key_id ?? null,
+              },
+              jobId,
+              jobPriority,
+              isDirectToBullMQ,
+              true,
+              timeout !== undefined ? timeout + totalWait : null,
+              isRabbitQueue, // use new rabbit queue if available
+            );
+
+            return result;
+          },
+        );
+
+        doc = job?.returnvalue ?? null;
+
+        if (!isRabbitQueue) {
+          // Wait for job completion span
+          doc = await withSpan("api.scrape.wait_for_job", async waitSpan => {
+            setSpanAttributes(waitSpan, {
+              "wait.timeout":
+                timeout !== undefined ? timeout + totalWait : null,
+              "wait.job_id": jobId,
+            });
+
+            const result = await waitForJob(
+              job ?? jobId,
+              timeout !== undefined ? timeout + totalWait : null,
+              zeroDataRetention,
+              logger,
+            );
+
+            setSpanAttributes(waitSpan, {
+              "wait.success": true,
+            });
+
+            return result;
           });
-
-          const result = await waitForJob(
-            job ?? jobId,
-            timeout !== undefined ? timeout + totalWait : null,
-            zeroDataRetention,
-            logger,
-          );
-
-          setSpanAttributes(waitSpan, {
-            "wait.success": true,
-          });
-
-          return result;
-        });
+        }
       } catch (e) {
         logger.error(`Error in scrapeController`, {
           version: "v2",
@@ -226,7 +238,18 @@ export async function scrapeController(
         }
       }
 
-      await scrapeQueue.removeJob(jobId, logger);
+      if (!isRabbitQueue) {
+        if (!(await scrapeQueue.removeJob(jobId, logger))) {
+          logger.warn("Could not remove job from queue", { jobId });
+        }
+      }
+
+      if (!doc) {
+        return res.status(500).json({
+          success: false,
+          error: "(Internal server error) - Job timed out (no page)",
+        });
+      }
 
       if (!hasFormatOfType(req.body.formats, "rawHtml")) {
         if (doc && doc.rawHtml) {

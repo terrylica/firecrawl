@@ -20,7 +20,7 @@ import { Logger } from "winston";
 import { ScrapeJobTimeoutError, TransportableError } from "../lib/error";
 import { deserializeTransportableError } from "../lib/error-serde";
 import { abTestJob } from "./ab-test";
-import { NuQJob, scrapeQueue } from "./worker/nuq";
+import { isRabbitQueue, NuQJob, scrapeQueue } from "./worker/nuq";
 import { serializeTraceContext } from "../lib/otel-tracer";
 
 /**
@@ -86,7 +86,12 @@ export async function _addScrapeJobToBullMQ(
     }
   }
 
-  return await scrapeQueue.addJob(jobId, webScraperOptions, priority, listenable);
+  return await scrapeQueue.addJob(
+    jobId,
+    webScraperOptions,
+    priority,
+    listenable,
+  );
 }
 
 async function addScrapeJobRaw(
@@ -181,10 +186,20 @@ async function addScrapeJobRaw(
 
     webScraperOptions.concurrencyLimited = true;
 
-    await _addScrapeJobToConcurrencyQueue(webScraperOptions, jobId, priority, listenable);
+    await _addScrapeJobToConcurrencyQueue(
+      webScraperOptions,
+      jobId,
+      priority,
+      listenable,
+    );
     return null;
   } else {
-    return await _addScrapeJobToBullMQ(webScraperOptions, jobId, priority, listenable);
+    return await _addScrapeJobToBullMQ(
+      webScraperOptions,
+      jobId,
+      priority,
+      listenable,
+    );
   }
 }
 
@@ -194,7 +209,13 @@ export async function addScrapeJob(
   priority: number = 0,
   directToBullMQ: boolean = false,
   listenable: boolean = false,
+  timeout: number | null = null,
+  useNewRabbitQueue: boolean = false,
 ): Promise<NuQJob<ScrapeJobData> | null> {
+  if (isRabbitQueue && useNewRabbitQueue) {
+    return queueRabbitJob(webScraperOptions, jobId, priority, timeout);
+  }
+
   // Capture trace context to propagate to worker
   const traceContext = serializeTraceContext();
   const optionsWithTrace: ScrapeJobData = {
@@ -457,4 +478,80 @@ export async function waitForJob(
   }
 
   return doc;
+}
+
+// ===========================
+// RabbitMQ Job Queue
+// ===========================
+
+async function queueRabbitJob(
+  webScraperOptions: ScrapeJobData,
+  jobId: string = uuidv4(),
+  priority: number = 0,
+  timeout: number | null = null,
+  logger: Logger = _logger,
+): Promise<NuQJob<ScrapeJobData, Document | null> | null> {
+  if (!isRabbitQueue) {
+    throw new Error("RabbitMQ is not enabled");
+  }
+
+  // Capture trace context to propagate to worker
+  const traceContext = serializeTraceContext();
+  const optionsWithTrace: ScrapeJobData = {
+    ...webScraperOptions,
+    traceContext,
+  };
+
+  const job: NuQJob<ScrapeJobData, Document | null> = {
+    id: jobId,
+    data: optionsWithTrace,
+    status: "queued",
+    createdAt: new Date(),
+    priority,
+    listenChannelId: "rabbit",
+  };
+
+  let doc: Document | null = null;
+  try {
+    doc = await scrapeQueue.addRabbitJob(
+      job,
+      timeout !== null ? timeout + 100 : null,
+      webScraperOptions.zeroDataRetention,
+      logger,
+    );
+  } catch (e) {
+    if (e instanceof TransportableError) {
+      throw e;
+    } else if (e instanceof Error) {
+      const x = deserializeTransportableError(e.message);
+      if (x) {
+        throw x;
+      } else {
+        throw e;
+      }
+    } else {
+      throw e;
+    }
+  }
+
+  logger.debug("Got job");
+
+  // should only be null if the doc is too large for Rabbit / Redis
+  if (!doc) {
+    const docs = await getJobFromGCS(job.id);
+    logger.debug("Got job from GCS");
+    if (!docs || docs.length === 0) {
+      throw new Error("Job not found in GCS");
+    }
+    doc = docs[0]!;
+
+    if (webScraperOptions.zeroDataRetention) {
+      await removeJobFromGCS(job.id);
+    }
+  }
+
+  return {
+    ...job,
+    returnvalue: doc,
+  };
 }

@@ -57,7 +57,7 @@ import {
   UnknownError,
 } from "../../lib/error";
 import { serializeTransportableError } from "../../lib/error-serde";
-import type { NuQJob } from "./nuq";
+import { isRabbitQueue, type NuQJob } from "./nuq";
 import {
   ScrapeJobData,
   ScrapeJobKickoff,
@@ -71,6 +71,7 @@ import {
   withSpan,
   setSpanAttributes,
 } from "../../lib/otel-tracer";
+import { NUQ_GCS_WAIT_SIZE } from "./queue/nuq-rabbit";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -516,7 +517,10 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
 
       doc.metadata.creditsUsed = credits_billed ?? undefined;
 
-      await logJob(
+      const blobStr = JSON.stringify(doc);
+      const blobSize = Buffer.byteLength(blobStr, "utf8");
+
+      const logPromise = logJob(
         {
           job_id: job.id,
           success: true,
@@ -542,6 +546,11 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
         false,
         job.data.internalOptions?.bypassBilling ?? false,
       );
+
+      // only 'await' the GCS upload if it's a large document (not forwarded to API via Rabbit / Redis)
+      if (blobSize > NUQ_GCS_WAIT_SIZE) {
+        await logPromise;
+      }
     }
 
     logger.info(`🐂 Job done ${job.id}`);
@@ -1145,7 +1154,10 @@ async function processJobWithTracing(job: NuQJob<ScrapeJobData>, logger: any) {
             }
 
             try {
-              if (process.env.GCS_BUCKET_NAME) {
+              if (isRabbitQueue && job.listenChannelId === "rabbit") {
+                logger.debug("NuQ RabbitMQ job succeeded");
+                return result.document;
+              } else if (process.env.GCS_BUCKET_NAME) {
                 logger.debug("Job succeeded -- putting null in Redis");
                 return null;
               } else {

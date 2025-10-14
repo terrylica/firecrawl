@@ -812,7 +812,9 @@ export async function queryIndexAtSplitLevelWithMeta(
       .rpc("query_index_at_split_level_with_meta", {
         i_level: level,
         i_url_hash: urlSplitsHash[level],
-        i_newer_than: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+        i_newer_than: new Date(
+          Date.now() - 2 * 24 * 60 * 60 * 1000,
+        ).toISOString(),
       })
       .range(iteration * 1000, (iteration + 1) * 1000);
 
@@ -870,7 +872,9 @@ export async function queryIndexAtDomainSplitLevelWithMeta(
       .rpc("query_index_at_domain_split_level_with_meta", {
         i_level: level,
         i_domain_hash: domainSplitsHash[level],
-        i_newer_than: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+        i_newer_than: new Date(
+          Date.now() - 2 * 24 * 60 * 60 * 1000,
+        ).toISOString(),
       })
       .range(iteration * 1000, (iteration + 1) * 1000);
 

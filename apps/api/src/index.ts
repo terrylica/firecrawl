@@ -31,10 +31,11 @@ import { attachWsProxy } from "./services/agentLivecastWS";
 import { cacheableLookup } from "./scraper/scrapeURL/lib/cacheableLookup";
 import { v2Router } from "./routes/v2";
 import domainFrequencyRouter from "./routes/domain-frequency";
-import { nuqShutdown } from "./services/worker/nuq";
+import { isRabbitQueue, nuqShutdown } from "./services/worker/nuq";
 import { getErrorContactMessage } from "./lib/deployment";
 import { initializeBlocklist } from "./scraper/WebScraper/utils/blocklist";
 import responseTime from "response-time";
+import { rabbit } from "./services/worker/queue/nuq-rabbit";
 
 const { createBullBoard } = require("@bull-board/api");
 const { BullMQAdapter } = require("@bull-board/api/bullMQAdapter");
@@ -117,6 +118,10 @@ async function startServer(port = DEFAULT_PORT) {
 
   // Attach WebSocket proxy to the Express app
   attachWsProxy(app);
+
+  if (isRabbitQueue) {
+    await rabbit.start();
+  }
 
   const server = app.listen(Number(port), HOST, () => {
     logger.info(`Worker ${process.pid} listening on port ${port}`);

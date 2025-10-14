@@ -5,6 +5,9 @@ import { type ScrapeJobData } from "../../types";
 import { withSpan, setSpanAttributes } from "../../lib/otel-tracer";
 import amqp from "amqplib";
 
+import { Document } from "../../controllers/v2/types";
+import { rabbit } from "./queue/nuq-rabbit";
+
 // === Basics
 
 const nuqPool = new Pool({
@@ -30,6 +33,8 @@ export type NuQJob<Data = any, ReturnValue = any> = {
   lock?: string;
 };
 
+export const isRabbitQueue = process.env.NUQ_RABBITMQ_URL !== undefined;
+
 const listenChannelId = process.env.NUQ_POD_NAME ?? "main";
 
 // === Queue
@@ -54,12 +59,16 @@ class NuQ<JobData = any, JobReturnValue = any> {
   private listens: {
     [key: string]: ((status: "completed" | "failed") => void)[];
   } = {};
+
   private shuttingDown = false;
+  private startedListener = false;
 
   private async startListener() {
-    if (this.listener || this.shuttingDown) return;
+    if (this.listener || this.startedListener || this.shuttingDown) return;
 
     if (process.env.NUQ_RABBITMQ_URL) {
+      this.startedListener = true;
+
       const connection = await amqp.connect(process.env.NUQ_RABBITMQ_URL);
       const channel = await connection.createChannel();
       await channel.prefetch(1);
@@ -85,7 +94,7 @@ class NuQ<JobData = any, JobReturnValue = any> {
 
       let reconnectTimeout: NodeJS.Timeout | null = null;
 
-      const onClose = (function onClose() {
+      const onClose = function onClose() {
         logger.info("NuQ listener channel closed", {
           module: "nuq/rabbitmq",
         });
@@ -104,7 +113,7 @@ class NuQ<JobData = any, JobReturnValue = any> {
           250,
         );
         return;
-      }).bind(this);
+      }.bind(this);
 
       connection.on("close", onClose);
       channel.on("close", onClose);
@@ -114,7 +123,7 @@ class NuQ<JobData = any, JobReturnValue = any> {
         (msg => {
           if (msg === null) {
             onClose();
-            return;            
+            return;
           }
 
           logger.info("NuQ job received", {
@@ -921,6 +930,82 @@ class NuQ<JobData = any, JobReturnValue = any> {
       await ns.connection.close();
     }
   }
+
+  // =========================================================================
+  // NuQ RabbitMQ
+  // =========================================================================
+
+  public async addRabbitJob(
+    job: NuQJob<ScrapeJobData, Document | null>,
+    timeoutMs: number | null,
+    zeroDataRetention: boolean,
+    _logger: Logger = logger,
+  ) {
+    const id = job.id;
+
+    return withSpan("nuq.waitForJob", async span => {
+      setSpanAttributes(span, {
+        "nuq.queue_name": this.queueName,
+        "nuq.job_id": id,
+        "nuq.timeout": timeoutMs ?? undefined,
+        "nuq.wait_mode": this.nuqWaitMode,
+        "nuq.rabbitmq": true,
+      });
+
+      if (this.nuqWaitMode !== "listen") {
+        throw new Error("RabbitMQ is only supported in listen mode");
+      }
+
+      if (process.env.NUQ_RABBITMQ_URL === undefined) {
+        throw new Error("NUQ_RABBITMQ_URL is not set");
+      }
+
+      const startTime = Date.now();
+
+      const done = new Promise<Document | null>(
+        (async (
+          resolve: (result?: Document | null) => void,
+          reject: (e: Error) => void,
+        ) => {
+          try {
+            const { status, result, failedReason } = await rabbit.queueJob(
+              job,
+              timeoutMs,
+              zeroDataRetention,
+              _logger,
+            );
+
+            if (status === "completed") {
+              resolve(result);
+            } else {
+              reject(new Error(failedReason));
+            }
+          } catch (e) {
+            if (e.message === "Timed out waiting for job") {
+              reject(new Error("Timed out"));
+            } else {
+              _logger.warn("nuqQueueJob failed", {
+                module: "nuq",
+                method: "nuqWaitForJob",
+                error: e,
+                scrapeId: id,
+              });
+              return;
+            }
+          }
+        }).bind(this),
+      );
+
+      const result = await done;
+
+      setSpanAttributes(span, {
+        "nuq.wait_duration_ms": Date.now() - startTime,
+        "nuq.wait_success": true,
+      });
+
+      return result;
+    });
+  }
 }
 
 export function nuqGetLocalMetrics(): string {
@@ -951,4 +1036,8 @@ export const scrapeQueue = new NuQ<ScrapeJobData>("nuq.queue_scrape");
 export async function nuqShutdown() {
   await scrapeQueue.shutdown();
   await nuqPool.end();
+
+  if (isRabbitQueue) {
+    await rabbit.stop();
+  }
 }

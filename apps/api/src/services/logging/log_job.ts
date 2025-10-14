@@ -88,6 +88,7 @@ export async function logJob(
       return;
     }
 
+    // do we need to await here for job sync?
     if (force) {
       await withSpan("firecrawl-log-job-supabase-force-insert", async span => {
         setSpanAttributes(span, {

@@ -74,3 +74,8 @@ export { setValue, getValue, deleteKey };
 const redisEvictURL =
   process.env.REDIS_EVICT_URL ?? process.env.REDIS_RATE_LIMIT_URL;
 export const redisEvictConnection = new IORedis(redisEvictURL!);
+
+const redisCacheURL =
+  process.env.REDIS_CACHE_URL ?? process.env.REDIS_RATE_LIMIT_URL;
+
+export const redisCacheConnection = new IORedis(redisCacheURL!);

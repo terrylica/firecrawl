@@ -29,6 +29,7 @@ export async function saveJobToGCS(job: FirecrawlJob): Promise<void> {
     const blob = bucket.file(`${job.job_id}.json`);
 
     // Save job docs with retry
+    // do we want to save 'docs' when it was a cache hit? seems redundant?
     for (let i = 0; i < 3; i++) {
       try {
         await blob.save(JSON.stringify(job.docs), {
