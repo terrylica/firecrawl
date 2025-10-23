@@ -312,7 +312,7 @@ class NuQ<JobData = any, JobReturnValue = any> {
   }
 
   private async sendJobPrefetch(
-    job: NuQJob<JobData, JobReturnValue>,
+    job: any, // this is the row/db representation here!!
     _logger: Logger = logger,
   ) {
     await this.startSender();
@@ -1028,7 +1028,7 @@ class NuQ<JobData = any, JobReturnValue = any> {
             UPDATE ${this.queueName} q SET status = 'active'::nuq.job_status, lock = gen_random_uuid(), locked_at = now() FROM next WHERE q.id = next.id RETURNING ${this.jobReturning.map(x => `q.${x}`).join(", ")};
           `,
         )
-      ).rows.map(row => this.rowToJob(row)!);
+      ).rows;
 
       for (const job of jobs) {
         await this.sendJobPrefetch(
