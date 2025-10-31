@@ -1587,7 +1587,7 @@ describe("Scrape tests", () => {
     async () => {
       const response = await scrape(
         {
-          url: `${base}/code-blocks`,
+          url: `${base}/code-block`,
           formats: ["markdown"],
         },
         identity,
