@@ -3,13 +3,13 @@ import { BrandingProfile } from "../../types/branding";
 import { enhanceBrandingWithLLM } from "./llm";
 import { Meta } from "../../scraper/scrapeURL";
 import { Document } from "../../controllers/v2/types";
-import { ButtonSnapshot } from "./types";
+import { BrandingScriptReturn, ButtonSnapshot } from "./types";
 import { mergeBrandingResults } from "./merge";
 
 export async function brandingTransformer(
   meta: Meta,
   document: Document,
-  rawBranding: any, // cast as any since this is js return, we might need to validate this
+  rawBranding: BrandingScriptReturn,
 ): Promise<BrandingProfile> {
   let jsBranding = processRawBranding(rawBranding);
 
@@ -67,7 +67,7 @@ export async function brandingTransformer(
       "LLM branding enhancement failed, using JS analysis only",
       { error },
     );
-    brandingProfile = rawBranding;
+    brandingProfile = jsBranding;
     delete (brandingProfile as any).__framework_hints;
   }
 

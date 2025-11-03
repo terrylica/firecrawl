@@ -186,16 +186,15 @@ async function deriveBrandingFromActions(
   }
 
   // cast as any since this is js return, we might need to validate this
-  const rawBranding = document.actions!.javascriptReturns![brandingReturnIndex]
-    .value as any;
+  const javascriptReturn = document.actions!.javascriptReturns![
+    brandingReturnIndex
+  ].value as any;
+
+  const rawBranding = javascriptReturn?.branding;
 
   document.actions!.javascriptReturns!.splice(brandingReturnIndex, 1);
 
-  document.branding = await brandingTransformer(
-    meta,
-    document,
-    rawBranding?.value?.branding,
-  );
+  document.branding = await brandingTransformer(meta, document, rawBranding);
 
   return document;
 }

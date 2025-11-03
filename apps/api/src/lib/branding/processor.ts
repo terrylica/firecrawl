@@ -1,51 +1,5 @@
 import { BrandingProfile } from "../../types/branding";
-
-interface RawBrandingData {
-  cssData: {
-    colors: string[];
-    spacings: number[];
-    radii: number[];
-  };
-  snapshots: Array<{
-    tag: string;
-    classes: string;
-    text: string;
-    rect: { w: number; h: number };
-    colors: {
-      text: string;
-      background: string;
-      border: string;
-      borderWidth: number | null;
-    };
-    typography: {
-      fontStack: string[];
-      size: string | null;
-      weight: number | null;
-    };
-    radius: number | null;
-    shadow: string | null;
-    isButton: boolean;
-    isNavigation?: boolean;
-    hasCTAIndicator?: boolean;
-    isInput: boolean;
-    isLink: boolean;
-  }>;
-  images: Array<{ type: string; src: string }>;
-  typography: {
-    stacks: {
-      body: string[];
-      heading: string[];
-      paragraph: string[];
-    };
-    sizes: {
-      h1: string;
-      h2: string;
-      body: string;
-    };
-  };
-  frameworkHints: string[];
-  colorScheme: "light" | "dark";
-}
+import { BrandingScriptReturn } from "./types";
 
 function hexify(rgba: string): string | null {
   if (!rgba) return null;
@@ -137,7 +91,7 @@ function contrastYIQ(hex: string): number {
 
 // Infer color palette from snapshots
 function inferPalette(
-  snapshots: RawBrandingData["snapshots"],
+  snapshots: BrandingScriptReturn["snapshots"],
   cssColors: string[],
 ) {
   const freq = new Map<string, number>();
@@ -247,7 +201,7 @@ function pickLogo(images: Array<{ type: string; src: string }>): string | null {
 }
 
 // Process raw branding data into BrandingProfile
-export function processRawBranding(raw: RawBrandingData): BrandingProfile {
+export function processRawBranding(raw: BrandingScriptReturn): BrandingProfile {
   const palette = inferPalette(raw.snapshots, raw.cssData.colors);
 
   // Typography
