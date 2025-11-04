@@ -126,6 +126,8 @@ class AttributeResult(BaseModel):
 
 class BrandingProfile(BaseModel):
     """Branding information extracted from a website."""
+    model_config = {"extra": "allow"}
+    
     color_scheme: Optional[Literal["light", "dark"]] = None
     logo: Optional[str] = None
     fonts: Optional[List[Dict[str, Any]]] = None
