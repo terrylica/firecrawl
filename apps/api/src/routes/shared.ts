@@ -17,6 +17,7 @@ import { BLOCKLISTED_URL_MESSAGE } from "../lib/strings";
 import { addDomainFrequencyJob } from "../services";
 import * as geoip from "geoip-country";
 import { isSelfHosted } from "../lib/deployment";
+import { getCrawlStatusRateLimiter } from "../services/rate-limiter";
 
 export function checkCreditsMiddleware(
   _minimum?: number,
@@ -94,6 +95,7 @@ export function checkCreditsMiddleware(
 
 export function authMiddleware(
   rateLimiterMode: RateLimiterMode,
+  skipRateLimit: boolean = false,
 ): (req: RequestWithMaybeAuth, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     (async () => {
@@ -121,7 +123,7 @@ export function authMiddleware(
       //   currentRateLimiterMode = RateLimiterMode.ScrapeAgentPreview;
       // }
 
-      const auth = await authenticateUser(req, res, currentRateLimiterMode);
+      const auth = await authenticateUser(req, res, skipRateLimit ? undefined : currentRateLimiterMode);
 
       if (!auth.success) {
         if (!res.headersSent) {
@@ -287,4 +289,43 @@ export function wrap(
   return (req, res, next) => {
     controller(req, res).catch(err => next(err));
   };
+}
+
+export function crawlStatusRateLimitMiddleware(
+  req: RequestWithAuth<{ jobId: string }, any, any>,
+  res: Response,
+  next: NextFunction,
+) {
+  (async () => {
+    // For crawl status, use per-job-per-team rate limiting
+    const jobId = req.params.jobId;
+    const teamId = req.auth.team_id;
+    
+    if (!jobId || !teamId) {
+      return next();
+    }
+
+    const rateLimiter = getCrawlStatusRateLimiter();
+    const rateLimitKey = `${teamId}:${jobId}`;
+
+    try {
+      await rateLimiter.consume(rateLimitKey);
+      next();
+    } catch (rateLimiterRes) {
+      logger.error(`Crawl status rate limit exceeded for job: ${rateLimiterRes}`, {
+        teamId,
+        jobId,
+        rateLimiterRes,
+      });
+      const secs = Math.round(rateLimiterRes.msBeforeNext / 1000) || 1;
+      const retryDate = new Date(Date.now() + rateLimiterRes.msBeforeNext);
+
+      if (!res.headersSent) {
+        return res.status(429).json({
+          success: false,
+          error: `Rate limit exceeded for this job. Limit: 100 requests per minute per job. Consumed: ${rateLimiterRes.consumedPoints}, Remaining: ${rateLimiterRes.remainingPoints}. Please retry after ${secs}s, resets at ${retryDate}`,
+        });
+      }
+    }
+  })().catch(err => next(err));
 }

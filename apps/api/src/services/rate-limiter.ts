@@ -37,3 +37,8 @@ export function getRateLimiter(
     rate_limits?.[mode] ?? fallbackRateLimits?.[mode] ?? 500,
   );
 }
+
+export function getCrawlStatusRateLimiter(): RateLimiterRedis {
+  // 100 requests per minute per job per team
+  return createRateLimiter("crawlStatus", 100);
+}

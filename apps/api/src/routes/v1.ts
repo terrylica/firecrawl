@@ -32,6 +32,7 @@ import {
   idempotencyMiddleware,
   requestTimingMiddleware,
   wrap,
+  crawlStatusRateLimitMiddleware,
 } from "./shared";
 import { paymentMiddleware } from "x402-express";
 import { queueStatusController } from "../controllers/v1/queue-status";
@@ -172,32 +173,37 @@ v1Router.get(
 
 v1Router.get(
   "/crawl/:jobId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   wrap(crawlStatusController),
 );
 
 v1Router.get(
   "/batch/scrape/:jobId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   // Yes, it uses the same controller as the normal crawl status controller
   wrap((req: any, res): any => crawlStatusController(req, res, true)),
 );
 
 v1Router.get(
   "/crawl/:jobId/errors",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   wrap(crawlErrorsController),
 );
 
 v1Router.get(
   "/batch/scrape/:jobId/errors",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   wrap(crawlErrorsController),
 );
 
 v1Router.get(
   "/scrape/:jobId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   wrap(scrapeStatusController),
 );
 
@@ -233,7 +239,8 @@ v1Router.post(
 
 v1Router.get(
   "/llmstxt/:jobId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   wrap(generateLLMsTextStatusController),
 );
 
@@ -247,7 +254,8 @@ v1Router.post(
 
 v1Router.get(
   "/deep-research/:jobId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   wrap(deepResearchStatusController),
 );
 
@@ -255,13 +263,15 @@ v1Router.get(
 
 v1Router.delete(
   "/crawl/:jobId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   crawlCancelController,
 );
 
 v1Router.delete(
   "/batch/scrape/:jobId",
-  authMiddleware(RateLimiterMode.CrawlStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus, true),
+  crawlStatusRateLimitMiddleware,
   crawlCancelController,
 );
 // v1Router.get("/checkJobStatus/:jobId", crawlJobStatusPreviewController);

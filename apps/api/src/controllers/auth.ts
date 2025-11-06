@@ -427,7 +427,7 @@ async function supaAuthenticateUser(
     req.socket.remoteAddress) as string;
   const iptoken = incomingIP + token;
 
-  let rateLimiter: RateLimiterRedis;
+  let rateLimiter: RateLimiterRedis | null = null;
   let subscriptionData: { team_id: string } | null = null;
   let normalizedApi: string;
 
@@ -440,12 +440,14 @@ async function supaAuthenticateUser(
     );
   }
   if (token == process.env.PREVIEW_TOKEN) {
-    if (mode == RateLimiterMode.CrawlStatus) {
-      rateLimiter = getRateLimiter(RateLimiterMode.CrawlStatus, token);
-    } else if (mode == RateLimiterMode.ExtractStatus) {
-      rateLimiter = getRateLimiter(RateLimiterMode.ExtractStatus, token);
-    } else {
-      rateLimiter = getRateLimiter(RateLimiterMode.Preview, token);
+    if (mode !== undefined) {
+      if (mode == RateLimiterMode.CrawlStatus) {
+        rateLimiter = getRateLimiter(RateLimiterMode.CrawlStatus, token);
+      } else if (mode == RateLimiterMode.ExtractStatus) {
+        rateLimiter = getRateLimiter(RateLimiterMode.ExtractStatus, token);
+      } else {
+        rateLimiter = getRateLimiter(RateLimiterMode.Preview, token);
+      }
     }
     teamId = `preview_${iptoken}`;
   } else {
@@ -474,40 +476,46 @@ async function supaAuthenticateUser(
     subscriptionData = {
       team_id: teamId,
     };
-    rateLimiter = getRateLimiter(
-      mode ?? RateLimiterMode.Crawl,
-      chunk.rate_limits,
-    );
+    
+    if (mode !== undefined) {
+      rateLimiter = getRateLimiter(
+        mode,
+        chunk.rate_limits,
+      );
+    }
   }
 
-  const team_endpoint_token =
-    token === process.env.PREVIEW_TOKEN ? iptoken : teamId;
+  // Only apply rate limiting if mode is defined
+  if (rateLimiter !== null) {
+    const team_endpoint_token =
+      token === process.env.PREVIEW_TOKEN ? iptoken : teamId;
 
-  try {
-    await rateLimiter.consume(team_endpoint_token);
-  } catch (rateLimiterRes) {
-    logger.error(`Rate limit exceeded: ${rateLimiterRes}`, {
-      teamId,
-      priceId,
-      mode,
-      rateLimits: chunk?.rate_limits,
-      rateLimiterRes,
-    });
-    const secs = Math.round(rateLimiterRes.msBeforeNext / 1000) || 1;
-    const retryDate = new Date(Date.now() + rateLimiterRes.msBeforeNext);
+    try {
+      await rateLimiter.consume(team_endpoint_token);
+    } catch (rateLimiterRes) {
+      logger.error(`Rate limit exceeded: ${rateLimiterRes}`, {
+        teamId,
+        priceId,
+        mode,
+        rateLimits: chunk?.rate_limits,
+        rateLimiterRes,
+      });
+      const secs = Math.round(rateLimiterRes.msBeforeNext / 1000) || 1;
+      const retryDate = new Date(Date.now() + rateLimiterRes.msBeforeNext);
 
-    // We can only send a rate limit email every 7 days, send notification already has the date in between checking
-    const startDate = new Date();
-    const endDate = new Date();
-    endDate.setDate(endDate.getDate() + 7);
+      // We can only send a rate limit email every 7 days, send notification already has the date in between checking
+      const startDate = new Date();
+      const endDate = new Date();
+      endDate.setDate(endDate.getDate() + 7);
 
-    // await sendNotification(team_id, NotificationType.RATE_LIMIT_REACHED, startDate.toISOString(), endDate.toISOString());
+      // await sendNotification(team_id, NotificationType.RATE_LIMIT_REACHED, startDate.toISOString(), endDate.toISOString());
 
-    return {
-      success: false,
-      error: `Rate limit exceeded. Consumed (req/min): ${rateLimiterRes.consumedPoints}, Remaining (req/min): ${rateLimiterRes.remainingPoints}. Upgrade your plan at https://firecrawl.dev/pricing for increased rate limits or please retry after ${secs}s, resets at ${retryDate}`,
-      status: 429,
-    };
+      return {
+        success: false,
+        error: `Rate limit exceeded. Consumed (req/min): ${rateLimiterRes.consumedPoints}, Remaining (req/min): ${rateLimiterRes.remainingPoints}. Upgrade your plan at https://firecrawl.dev/pricing for increased rate limits or please retry after ${secs}s, resets at ${retryDate}`,
+        status: 429,
+      };
+    }
   }
 
   if (
