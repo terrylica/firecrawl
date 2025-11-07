@@ -537,47 +537,20 @@ const baseScrapeOptions = z.strictObject({
   __experimental_omceDomain: z.string().optional(),
 });
 
-const fire1Refine = obj => {
-  if (
-    obj.agent?.model?.toLowerCase() === "fire-1" &&
-    obj.jsonOptions?.agent?.model?.toLowerCase() === "fire-1"
-  ) {
-    return false;
-  }
-  return true;
-};
 const fire1RefineOpts = {
   message:
     "You may only specify the FIRE-1 model in agent or jsonOptions.agent, but not both.",
-};
-const waitForRefine = obj => {
-  if (obj.waitFor && obj.timeout) {
-    if (typeof obj.timeout !== "number" || obj.timeout <= 0) {
-      return false;
-    }
-    return obj.waitFor <= obj.timeout / 2;
-  }
-  return true;
-};
+} as const;
+
 const waitForRefineOpts = {
   message: "waitFor must not exceed half of timeout",
-  path: ["waitFor"],
+  path: ["waitFor"] as PropertyKey[],
 };
-const extractRefine = obj => {
-  const hasExtractFormat = obj.formats?.includes("extract");
-  const hasExtractOptions = obj.extract !== undefined;
-  const hasJsonFormat = obj.formats?.includes("json");
-  const hasJsonOptions = obj.jsonOptions !== undefined;
-  return (
-    ((hasExtractFormat && hasExtractOptions) ||
-      (!hasExtractFormat && !hasExtractOptions)) &&
-    ((hasJsonFormat && hasJsonOptions) || (!hasJsonFormat && !hasJsonOptions))
-  );
-};
+
 const extractRefineOpts = {
   message:
     "When 'extract' or 'json' format is specified, corresponding options must be provided, and vice versa",
-};
+} as const;
 const extractTransform = (obj: ScrapeOptions) => {
   // Handle timeout
   if (
@@ -639,6 +612,40 @@ const scrapeOptionsBase = baseScrapeOptions.extend({
   extract: extractOptionsWithAgent.optional(),
   jsonOptions: extractOptionsWithAgent.optional(),
 });
+
+type ScrapeOptionsBase = z.infer<typeof scrapeOptionsBase>;
+
+const fire1Refine = (obj: ScrapeOptionsBase): boolean => {
+  if (
+    obj.agent?.model?.toLowerCase() === "fire-1" &&
+    obj.jsonOptions?.agent?.model?.toLowerCase() === "fire-1"
+  ) {
+    return false;
+  }
+  return true;
+};
+
+const waitForRefine = (obj: ScrapeOptionsBase): boolean => {
+  if (obj.waitFor !== undefined && obj.timeout !== undefined) {
+    if (typeof obj.timeout !== "number" || obj.timeout <= 0) {
+      return false;
+    }
+    return obj.waitFor <= obj.timeout / 2;
+  }
+  return true;
+};
+
+const extractRefine = (obj: ScrapeOptionsBase): boolean => {
+  const hasExtractFormat = obj.formats?.includes("extract");
+  const hasExtractOptions = obj.extract !== undefined;
+  const hasJsonFormat = obj.formats?.includes("json");
+  const hasJsonOptions = obj.jsonOptions !== undefined;
+  return (
+    ((hasExtractFormat && hasExtractOptions) ||
+      (!hasExtractFormat && !hasExtractOptions)) &&
+    ((hasJsonFormat && hasJsonOptions) || (!hasJsonFormat && !hasJsonOptions))
+  );
+};
 
 export const scrapeOptions = strictWithMessage(scrapeOptionsBase)
   .refine(
