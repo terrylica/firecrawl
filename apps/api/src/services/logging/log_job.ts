@@ -19,6 +19,11 @@ export async function logJob(
   force: boolean = false,
   bypassLogging: boolean = false,
 ) {
+  const useDbAuthentication = process.env.USE_DB_AUTHENTICATION === "true";
+  if (!useDbAuthentication) {
+    return;
+  }
+
   let logger = _logger.child({
     module: "log_job",
     method: "logJob",
@@ -57,11 +62,6 @@ export async function logJob(
       }).catch(error => {
         logger.error("Error saving job to BigQuery", { error });
       });
-    }
-
-    const useDbAuthentication = process.env.USE_DB_AUTHENTICATION === "true";
-    if (!useDbAuthentication) {
-      return;
     }
 
     // Redact any pages that have an authorization header
