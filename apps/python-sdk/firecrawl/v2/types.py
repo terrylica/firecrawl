@@ -621,14 +621,6 @@ class SearchResultImages(BaseModel):
     position: Optional[int] = None
 
 
-class SearchData(BaseModel):
-    """Search results grouped by source type."""
-
-    web: Optional[List[Union[SearchResultWeb, Document]]] = None
-    news: Optional[List[Union[SearchResultNews, Document]]] = None
-    images: Optional[List[Union[SearchResultImages, Document]]] = None
-
-
 class MapDocument(Document):
     """A document from a map operation with URL and description."""
 
