@@ -14,6 +14,7 @@ from pydantic import (
     field_validator,
     ValidationError,
     model_serializer,
+    model_validator,
 )
 
 # Suppress pydantic warnings about schema field shadowing
@@ -146,6 +147,63 @@ class DocumentMetadata(BaseModel):
             except ValueError:
                 return value
         return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_lists_for_string_fields(cls, data):
+        """Before validation: coerce lists to strings for known single-string fields.
+        Preserves unknown-key lists.
+        """
+        if not isinstance(data, dict):
+            return data
+        single_str_fields = {
+            "title",
+            "description",
+            "url",
+            "language",
+            "robots",
+            "og_title",
+            "og_description",
+            "og_url",
+            "og_image",
+            "og_audio",
+            "og_determiner",
+            "og_locale",
+            "og_site_name",
+            "og_video",
+            "favicon",
+            "dc_terms_created",
+            "dc_date_created",
+            "dc_date",
+            "dc_terms_type",
+            "dc_type",
+            "dc_terms_audience",
+            "dc_terms_subject",
+            "dc_subject",
+            "dc_description",
+            "dc_terms_keywords",
+            "modified_time",
+            "published_time",
+            "article_tag",
+            "article_section",
+            "source_url",
+            "scrape_id",
+            "content_type",
+            "cached_at",
+            "error",
+        }
+        for k, v in list(data.items()):
+            if isinstance(v, list) and k in single_str_fields:
+                data[k] = cls._coerce_list_to_string(v)
+            # For ints that might appear as list, take first
+            if isinstance(v, list) and k in {
+                "status_code",
+                "num_pages",
+                "credits_used",
+            }:
+                first = v[0] if v else None
+                data[k] = cls._coerce_string_to_int(first)
+        return data
 
     @field_validator(
         "robots",
