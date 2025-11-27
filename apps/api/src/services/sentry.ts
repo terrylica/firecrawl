@@ -8,10 +8,7 @@ if (process.env.SENTRY_DSN) {
 
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
-    integrations: integrations => {
-      integrations.push(nodeProfilingIntegration);
-      return integrations;
-    },
+    integrations: [nodeProfilingIntegration()],
     tracesSampleRate: 0,
     serverName: process.env.NUQ_POD_NAME,
     environment: process.env.SENTRY_ENVIRONMENT ?? "production",
