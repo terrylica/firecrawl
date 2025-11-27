@@ -178,8 +178,7 @@
     ],
     "overrides": {
       "brace-expansion@>=2.0.0 <=2.0.1": "2.0.2",
-      "debug": ">=4.4.3",
-      "uuid": "<=10.0.0"
+      "debug": ">=4.4.3"
     }
   },
   "lint-staged": {
