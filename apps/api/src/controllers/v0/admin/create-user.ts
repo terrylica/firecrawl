@@ -4,31 +4,11 @@ import { supabase_service } from "../../../services/supabase";
 import crypto from "crypto";
 import { z } from "zod";
 
-function addIsoDurationToDate(date: Date, duration: string): Date {
-  const regex =
-    /P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?/;
-  const matches = duration.match(regex);
-
-  if (!matches) {
-    throw new Error("Invalid ISO 8601 duration format");
+async function addCoupon(teamId: string, integration: any) {
+  if (!integration.coupon_credits) {
+    return;
   }
 
-  const [, years, months, days, hours, minutes, seconds] = matches.map(
-    m => parseInt(m) || 0,
-  );
-
-  const result = new Date(date);
-  result.setFullYear(result.getFullYear() + years);
-  result.setMonth(result.getMonth() + months);
-  result.setDate(result.getDate() + days);
-  result.setHours(result.getHours() + hours);
-  result.setMinutes(result.getMinutes() + minutes);
-  result.setSeconds(result.getSeconds() + seconds);
-
-  return result;
-}
-
-async function addCoupon(teamId: string, integration: any) {
   const { error } = await supabase_service.from("coupons").insert({
     team_id: teamId,
     credits: integration.coupon_credits,
@@ -37,11 +17,8 @@ async function addCoupon(teamId: string, integration: any) {
     initial_credits: integration.coupon_credits,
     code: integration.coupon_code,
     is_extract: false,
-    expires_at: integration.coupon_expiry
-      ? addIsoDurationToDate(
-          new Date(),
-          integration.coupon_expiry,
-        ).toISOString()
+    expires_at: integration.coupon_expiry_ms
+      ? new Date(Date.now() + integration.coupon_expiry_ms).toISOString()
       : null,
     override_rate_limits: integration.coupon_rate_limits,
     override_concurrency: integration.coupon_concurrency,
@@ -50,12 +27,10 @@ async function addCoupon(teamId: string, integration: any) {
   if (error) {
     throw error;
   }
-
-  return true;
 }
 
 export async function createUserController(req: Request, res: Response) {
-  const logger = _logger.child({
+  let logger = _logger.child({
     module: "v0/admin/create-user",
     method: "createUserController",
   });
@@ -85,6 +60,10 @@ export async function createUserController(req: Request, res: Response) {
     if (integrationError || !integration) {
       return res.status(401).json({ error: "Unauthorized" });
     }
+
+    logger = logger.child({
+      integration: integration.slug,
+    });
 
     const bodySchema = z.object({
       email: z.string().email(),
@@ -158,6 +137,10 @@ export async function createUserController(req: Request, res: Response) {
         }
 
         alreadyExisted = true;
+
+        logger.info("Found existing team from existing user", {
+          teamId,
+        });
       } else {
         // create a new team with this referrer
         const { data: newTeam, error: newTeamError } = await supabase_service
@@ -195,6 +178,10 @@ export async function createUserController(req: Request, res: Response) {
         apiKey = newApiKey.key;
 
         await addCoupon(teamId, integration);
+
+        logger.info("Created new team from existing user", {
+          teamId,
+        });
       }
     } else {
       const { data: newUser, error: newUserError } =
@@ -236,6 +223,10 @@ export async function createUserController(req: Request, res: Response) {
       apiKey = apiKeyFc.key;
 
       await addCoupon(teamId, integration);
+
+      logger.info("Created new user from scratch", {
+        teamId,
+      });
     }
 
     return res.status(200).json({
@@ -246,6 +237,7 @@ export async function createUserController(req: Request, res: Response) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.message });
     } else {
+      logger.error("Failed to create user", { error });
       return res.status(500).json({ error: "Internal server error" });
     }
   }
