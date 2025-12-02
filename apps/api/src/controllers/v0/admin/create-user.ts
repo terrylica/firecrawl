@@ -47,6 +47,9 @@ export async function createUserController(req: Request, res: Response) {
     }
 
     // sha-256 hash the token
+    if (!token) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
     const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
     // Look up integration by key
