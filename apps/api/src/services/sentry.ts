@@ -16,7 +16,10 @@ if (process.env.SENTRY_DSN) {
         recordOutputs: true,
       }),
     ],
-    tracesSampleRate: 0,
+    tracesSampler: samplingContext => {
+      if (samplingContext.name.startsWith("gen_ai.")) return 1.0;
+      return 0;
+    },
     sampleRate: 0.05,
     serverName: process.env.NUQ_POD_NAME,
     environment: process.env.SENTRY_ENVIRONMENT ?? "production",
