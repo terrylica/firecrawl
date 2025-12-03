@@ -6,8 +6,6 @@ import {
   CrawlResponse,
   RequestWithAuth,
   toV0CrawlerOptions,
-  scrapeOptions as scrapeOptionsSchema,
-  ScrapeOptions,
 } from "./types";
 import {
   crawlToCrawler,
@@ -85,9 +83,7 @@ export async function crawlController(
     scrapeOptions: undefined,
     prompt: undefined,
   };
-
-  const scrapeOptions: ScrapeOptions =
-    req.body.scrapeOptions ?? scrapeOptionsSchema.parse({});
+  const scrapeOptions = req.body.scrapeOptions;
 
   let promptGeneratedOptions = {};
   if (req.body.prompt) {

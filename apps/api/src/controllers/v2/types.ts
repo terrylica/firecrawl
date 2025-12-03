@@ -828,7 +828,7 @@ const crawlRequestSchemaBase = crawlerOptions.extend({
   url: CRAWL_URL,
   origin: z.string().optional().prefault("api"),
   integration: integrationSchema.optional().transform(val => val || null),
-  scrapeOptions: baseScrapeOptions.optional(),
+  scrapeOptions: baseScrapeOptions.prefault(() => baseScrapeOptions.parse({})),
   webhook: webhookSchema.optional(),
   limit: z.number().prefault(10000),
   maxConcurrency: z.int().positive().optional(),
@@ -839,10 +839,11 @@ const crawlRequestSchemaBase = crawlerOptions.extend({
 export const crawlRequestSchema = strictWithMessage(crawlRequestSchemaBase)
   .refine(x => waitForRefine(x.scrapeOptions), waitForRefineOpts)
   .transform(x => {
+    const scrapeOptionsValue = x.scrapeOptions ?? baseScrapeOptions.parse({});
     return {
       ...x,
       url: x.url.url, // Extract the actual URL from the CRAWL_URL result
-      scrapeOptions: extractTransform(x.scrapeOptions),
+      scrapeOptions: extractTransformRequired(scrapeOptionsValue),
     };
   });
 
