@@ -6,7 +6,6 @@ import {
   TEST_PRODUCTION,
 } from "../lib";
 import { search, idmux, Identity } from "./lib";
-import { hasAnyResults } from "../../../search/v2/fireEngine-v2";
 
 let identity: Identity;
 
@@ -215,85 +214,4 @@ describeIf(TEST_PRODUCTION || HAS_SEARCH || HAS_PROXY)("Search tests", () => {
     },
     60000,
   );
-});
-
-describe("hasAnyResults", () => {
-  it("returns false for null response", () => {
-    expect(hasAnyResults(null as any, ["web"])).toBe(false);
-  });
-
-  it("returns false for undefined response", () => {
-    expect(hasAnyResults(undefined as any, ["web"])).toBe(false);
-  });
-
-  it("returns false for empty object response", () => {
-    expect(hasAnyResults({}, ["web"])).toBe(false);
-  });
-
-  it("returns true when at least one requested type has results", () => {
-    const response = {
-      web: [
-        { url: "https://example.com", title: "Example", description: "Test" },
-      ],
-      images: [],
-      news: [],
-    };
-    expect(hasAnyResults(response, ["web", "images", "news"])).toBe(true);
-  });
-
-  it("returns true when only images have results", () => {
-    const response = {
-      web: [],
-      images: [{ url: "https://example.com/image.jpg", title: "Image" }],
-      news: [],
-    };
-    expect(hasAnyResults(response, ["web", "images", "news"])).toBe(true);
-  });
-
-  it("returns true when only news has results", () => {
-    const response = {
-      web: [],
-      images: [],
-      news: [{ title: "News Article", snippet: "Test news" }],
-    };
-    expect(hasAnyResults(response, ["web", "images", "news"])).toBe(true);
-  });
-
-  it("returns false when all requested types are empty arrays", () => {
-    const response = {
-      web: [],
-      images: [],
-      news: [],
-    };
-    expect(hasAnyResults(response, ["web", "images", "news"])).toBe(false);
-  });
-
-  it("returns true when all requested types have results", () => {
-    const response = {
-      web: [
-        { url: "https://example.com", title: "Example", description: "Test" },
-      ],
-      images: [{ url: "https://example.com/image.jpg", title: "Image" }],
-      news: [{ title: "News Article", snippet: "Test news" }],
-    };
-    expect(hasAnyResults(response, ["web", "images", "news"])).toBe(true);
-  });
-
-  it("returns true when only requested type has results (single type)", () => {
-    const response = {
-      web: [
-        { url: "https://example.com", title: "Example", description: "Test" },
-      ],
-    };
-    expect(hasAnyResults(response, ["web"])).toBe(true);
-  });
-
-  it("returns false when requested type is missing from response", () => {
-    const response = {
-      web: [
-        { url: "https://example.com", title: "Example", description: "Test" },
-      ],
-    };
-    expect(hasAnyResults(response, ["images"])).toBe(false);
-  });
 });

@@ -26,7 +26,7 @@ function normalizeSearchTypes(
  * This allows partial results to be returned when some sources have data
  * but others don't, instead of requiring all sources to have results.
  */
-export function hasAnyResults(
+function hasAnyResults(
   response: SearchV2Response,
   requestedTypes: SearchResultType[],
 ): boolean {
