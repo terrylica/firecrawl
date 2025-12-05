@@ -777,7 +777,11 @@ const DOMAIN_FREQUENCY_INTERVAL = 10000;
   const engpickerPromise = (async () => {
     while (!isShuttingDown) {
       await new Promise(resolve => setTimeout(resolve, 1000));
-      await processEngpickerJob();
+      try {
+        await processEngpickerJob();
+      } catch (e) {
+        logger.error("Error processing engpicker job", { error: e });
+      }
     }
   })();
 
