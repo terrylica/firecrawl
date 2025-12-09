@@ -983,6 +983,7 @@ export type Document = {
     error?: string;
     numPages?: number;
     contentType?: string;
+    timezone?: string;
     proxyUsed: "basic" | "stealth";
     cacheState?: "hit" | "miss";
     cachedAt?: string;
