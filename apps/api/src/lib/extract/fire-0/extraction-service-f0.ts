@@ -875,6 +875,14 @@ export async function performExtraction_F0(
     );
   });
 
+  logger.debug("Logging extract to database", {
+    extractId,
+    llmUsage,
+    sources,
+    tokensBilled: tokensToBill,
+    creditsBilled: creditsToBill,
+  });
+
   // Log job with token usage and sources
   logExtract({
     id: extractId,
@@ -904,19 +912,31 @@ export async function performExtraction_F0(
       otherCost: llmUsage,
       totalCost: llmUsage,
     },
-  }).then(() => {
-    updateExtract(extractId, {
-      status: "completed",
-      llmUsage,
-      sources,
-      tokensBilled: tokensToBill,
-      creditsBilled: creditsToBill,
-    }).catch(error => {
-      logger.error(
-        `Failed to update extract ${extractId} status to completed: ${error}`,
-      );
+  })
+    .then(() => {
+      logger.debug("Updating extract status to completed", {
+        extractId,
+        llmUsage,
+        sources,
+        tokensBilled: tokensToBill,
+        creditsBilled: creditsToBill,
+      });
+
+      updateExtract(extractId, {
+        status: "completed",
+        llmUsage,
+        sources,
+        tokensBilled: tokensToBill,
+        creditsBilled: creditsToBill,
+      }).catch(error => {
+        logger.error(
+          `Failed to update extract ${extractId} status to completed: ${error}`,
+        );
+      });
+    })
+    .catch(error => {
+      logger.error(`Failed to log extract ${extractId} to database: ${error}`);
     });
-  });
 
   logger.debug("Done!");
 
