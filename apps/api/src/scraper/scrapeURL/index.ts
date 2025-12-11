@@ -2,6 +2,7 @@ import { Logger } from "winston";
 import { config } from "../../config";
 import * as Sentry from "@sentry/node";
 import { withSpan, setSpanAttributes } from "../../lib/otel-tracer";
+import { captureExceptionWithZdrCheck } from "../../services/sentry";
 
 import {
   type Document,
@@ -465,7 +466,7 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
     // TODO: handle sitemap data, see WebScraper/index.ts:280
     // TODO: ScrapeEvents
 
-    const fallbackList = buildFallbackList(meta);
+    const fallbackList = await buildFallbackList(meta);
 
     setSpanAttributes(span, {
       "engine.fallback_list": fallbackList.map(f => f.engine).join(","),
@@ -756,6 +757,7 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
           ? { title: engineResult.pdfMetadata.title }
           : {}),
         contentType: engineResult.contentType,
+        timezone: engineResult.timezone,
         proxyUsed: engineResult.proxyUsed ?? "basic",
         ...(fallbackList.find(x =>
           ["index", "index;documents"].includes(x.engine),
@@ -1212,7 +1214,11 @@ export async function scrapeURL(
         errorType = "AbortManagerThrownError";
         throw error.inner;
       } else {
-        Sentry.captureException(error);
+        captureExceptionWithZdrCheck(error, {
+          extra: {
+            zeroDataRetention: internalOptions.zeroDataRetention ?? false,
+          },
+        });
         meta.logger.error("scrapeURL: Unexpected error happened", { error });
         // TODO: results?
       }
