@@ -307,12 +307,15 @@ export function normalizeURL(url: string, sc: StoredCrawl): string {
   if (sc && sc.crawlerOptions && sc.crawlerOptions.ignoreQueryParameters) {
     urlO.search = "";
   }
-  // allow hash-based routes
-  if (
-    !urlO.hash ||
-    urlO.hash.length <= 2 ||
-    (!urlO.hash.startsWith("#/") && !urlO.hash.startsWith("#!/"))
-  ) {
+  // allow hash-based routes, but exclude patterns like #/?id=... which are
+  // typically documentation anchor links (e.g., Docsify docs), not SPA routes
+  const isHashRoute =
+    urlO.hash &&
+    urlO.hash.length > 2 &&
+    (urlO.hash.startsWith("#/") || urlO.hash.startsWith("#!/")) &&
+    !urlO.hash.startsWith("#/?") &&
+    !urlO.hash.startsWith("#!/?");
+  if (!isHashRoute) {
     urlO.hash = "";
   }
   return urlO.href;

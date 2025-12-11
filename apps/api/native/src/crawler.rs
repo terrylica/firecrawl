@@ -164,8 +164,16 @@ fn no_sections(url_str: &str) -> bool {
   }
 
   // Check if the hash fragment looks like a route (contains forward slashes and has substantial content)
+  // But exclude patterns like #/?id=... which are typically documentation anchor links, not SPA routes
   if let Some(hash_part) = url_str.split('#').nth(1) {
-    hash_part.len() > 1 && hash_part.contains('/')
+    // Must have length > 1 and contain a slash to be considered a route
+    if hash_part.len() <= 1 || !hash_part.contains('/') {
+      return false;
+    }
+    // Patterns starting with /? or !/? are typically query-based anchors (e.g., Docsify docs), not SPA routes
+    // These should be treated as section anchors and filtered out
+    let trimmed = hash_part.trim_start_matches('/').trim_start_matches('!').trim_start_matches('/');
+    !trimmed.starts_with('?')
   } else {
     false
   }
@@ -1049,5 +1057,38 @@ mod tests {
     assert!(is_file("style.css"));
     assert!(!is_file("page"));
     assert!(!is_file("directory/"));
+  }
+
+  #[test]
+  fn test_no_sections() {
+    // URLs without hash fragments should return true
+    assert!(no_sections("https://example.com/page"));
+    assert!(no_sections("https://example.com/blog/post"));
+    assert!(no_sections("https://example.com"));
+
+    // Simple anchor links should return false
+    assert!(!no_sections("https://example.com/page#section"));
+    assert!(!no_sections("https://example.com/page#top"));
+    assert!(!no_sections("https://example.com/page#"));
+    assert!(!no_sections("https://example.com/page#a"));
+    assert!(!no_sections("https://example.com/page#ab"));
+
+    // Hash fragments that look like SPA routes should return true
+    assert!(no_sections("https://example.com/app#/dashboard"));
+    assert!(no_sections("https://example.com/spa#/user/profile"));
+    assert!(no_sections("https://example.com/page#/settings/account"));
+    assert!(no_sections("https://example.com/page#abc/def"));
+
+    // Short hash fragments with slashes should return false
+    assert!(!no_sections("https://example.com/page#/"));
+
+    // Hash fragments starting with /? should return false (Docsify-style docs)
+    // These are typically documentation anchor links, not SPA routes
+    assert!(!no_sections("https://docs.example.com/docs/#/?id=pending"));
+    assert!(!no_sections("https://docs.example.com/docs/#/?id=section-name"));
+    assert!(!no_sections("https://example.com/page#/?foo=bar"));
+
+    // Hash fragments starting with !/? should also return false
+    assert!(!no_sections("https://example.com/page#!/?id=section"));
   }
 }
