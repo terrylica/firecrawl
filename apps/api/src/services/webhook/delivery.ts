@@ -6,10 +6,15 @@ import {
   getSecureDispatcherNoCookies,
   isIPPrivate,
 } from "../../scraper/scrapeURL/engines/utils/safeFetch";
-import { WebhookConfig, WebhookEvent, WebhookEventDataMap } from "./types";
+import type {
+  WebhookConfig,
+  WebhookEvent,
+  WebhookEventDataMap,
+  WebhookQueueMessage,
+} from "./types";
 import { redisEvictConnection } from "../redis";
 import { supabase_service } from "../supabase";
-import { webhookQueue, WebhookQueueMessage } from "./queue";
+import { webhookQueue } from "./queue";
 import { randomUUID } from "crypto";
 
 const WEBHOOK_INSERT_QUEUE_KEY = "webhook-insert-queue";

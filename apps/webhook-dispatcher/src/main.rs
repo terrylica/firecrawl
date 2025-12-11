@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
                 .json()
                 .with_span_list(false),
         )
-        .init();
+        .try_init()?;
 
     info!("Starting webhook dispatcher");
 
