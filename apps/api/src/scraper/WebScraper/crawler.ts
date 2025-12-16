@@ -141,6 +141,11 @@ export class WebCrawler {
     this.location = location;
   }
 
+  public setBaseUrl(newBase: string): void {
+    this.baseUrl = newBase;
+    this.robotsTxtUrl = `${this.baseUrl}${this.baseUrl.endsWith("/") ? "" : "/"}robots.txt`;
+  }
+
   public async filterLinks(
     sitemapLinks: string[],
     limit: number,

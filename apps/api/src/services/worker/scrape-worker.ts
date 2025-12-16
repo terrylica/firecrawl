@@ -278,7 +278,7 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
           job.data.crawl_id,
           sc,
           teamFlags,
-          doc.metadata.url ?? doc.metadata.sourceURL ?? sc.originUrl!,
+          sc.originUrl!,
           job.data.crawlerOptions,
         );
       }
@@ -351,6 +351,10 @@ async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
 
       if (crawler) {
         if (!sc.cancelled) {
+          crawler.setBaseUrl(
+            doc.metadata.url ?? doc.metadata.sourceURL ?? sc.originUrl!,
+          );
+
           const links = await crawler.filterLinks(
             await crawler.extractLinksFromHTML(
               rawHtml ?? "",
