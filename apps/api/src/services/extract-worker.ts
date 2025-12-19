@@ -205,17 +205,22 @@ app.listen(workerPort, () => {
   );
 });
 
-let isShuttingDown = false;
+async function shutdown() {
+  _logger.info("Shutting down extract worker...");
+  await shutdownExtractQueue();
+  _logger.info("Extract worker shut down");
+  process.exit(0);
+}
 
 if (require.main === module) {
   process.on("SIGINT", () => {
     _logger.debug("Received SIGINT. Shutting down gracefully...");
-    isShuttingDown = true;
+    shutdown();
   });
 
   process.on("SIGTERM", () => {
     _logger.debug("Received SIGTERM. Shutting down gracefully...");
-    isShuttingDown = true;
+    shutdown();
   });
 }
 
@@ -238,14 +243,4 @@ if (require.main === module) {
   ]);
 
   _logger.info("Extract worker started, consuming from RabbitMQ");
-
-  // Keep the process alive
-  process.on("beforeExit", async () => {
-    if (isShuttingDown) {
-      _logger.info("Shutting down extract worker...");
-      await shutdownExtractQueue();
-      _logger.info("Extract worker shut down");
-      process.exit(0);
-    }
-  });
 })();
