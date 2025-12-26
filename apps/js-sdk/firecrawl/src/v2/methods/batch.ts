@@ -6,11 +6,45 @@ import {
   type BatchScrapeOptions,
   type PaginationConfig,
   JobTimeoutError,
+  SdkError,
 } from "../types";
 import { HttpClient } from "../utils/httpClient";
 import { ensureValidScrapeOptions } from "../utils/validation";
 import { fetchAllPages } from "../utils/pagination";
 import { normalizeAxiosError, throwForBadResponse } from "../utils/errorHandler";
+
+function isRetryableError(err: any): boolean {
+  // JobTimeoutError should never be retried - it's the overall timeout
+  if (err instanceof JobTimeoutError) {
+    return false;
+  }
+  
+  // If it's an SdkError with a status code, check if it's retryable
+  if (err instanceof SdkError || (err && typeof err === 'object' && 'status' in err)) {
+    const status = err.status;
+    // 4xx errors are client errors and shouldn't be retried
+    if (status && status >= 400 && status < 500) {
+      return false; // Don't retry client errors (401, 404, etc.)
+    }
+    // 5xx errors are server errors and can be retried
+    if (status && status >= 500) {
+      return true;
+    }
+  }
+  
+  // Network errors (no response) are retryable
+  if (err?.isAxiosError && !err.response) {
+    return true;
+  }
+  
+  // HTTP timeout errors are retryable (different from JobTimeoutError)
+  if (err?.code === 'ECONNABORTED' || err?.message?.includes('timeout')) {
+    return true;
+  }
+  
+  // Default: retry on unknown errors (safer than not retrying)
+  return true;
+}
 
 export async function startBatchScrape(
   http: HttpClient,
@@ -125,7 +159,22 @@ export async function waitForBatchCompletion(http: HttpClient, jobId: string, po
         return status;
       }
     } catch (err: any) {
-      // Retry after error, could be network issue, etc
+      // Don't retry on permanent errors (4xx) - re-throw immediately with jobId context
+      if (!isRetryableError(err)) {
+        // Wrap error to include jobId for better debugging
+        if (err instanceof SdkError) {
+          const wrappedError = new SdkError(
+            err.message,
+            err.status,
+            err.code,
+            err.details,
+            jobId
+          );
+          throw wrappedError;
+        }
+        throw err;
+      }
+      // Otherwise, retry after delay - error might be transient (network issue, timeout, 5xx, etc.)
     }
 
     if (timeout != null && Date.now() - start > timeout * 1000) {
