@@ -12,7 +12,7 @@ use tokio::task;
 use url::Url;
 
 static URL_REGEX: LazyLock<Regex> =
-  LazyLock::new(|| Regex::new(r#"url\(['"]?([^'")]+)['"]?\)"#).unwrap());
+  LazyLock::new(|| Regex::new(r#"url\(['"]?([^'")]+)['"]?\)"#).expect("URL_REGEX is a valid static regex pattern"));
 
 use crate::utils::to_napi_err;
 
