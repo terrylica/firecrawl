@@ -68,11 +68,10 @@ export async function parseMarkdown(
   // Try HTTP service first if enabled
   if (config.HTML_TO_MARKDOWN_SERVICE_URL) {
     try {
-      let markdownContent = await convertHTMLToMarkdownWithHttpService(
-        html,
-        undefined,
-        { logger: contextLogger, requestId },
-      );
+      let markdownContent = await convertHTMLToMarkdownWithHttpService(html, {
+        logger: contextLogger,
+        requestId,
+      });
       markdownContent = await postProcessMarkdown(markdownContent);
       return markdownContent;
     } catch (error) {
@@ -94,7 +93,6 @@ export async function parseMarkdown(
       const converter = await GoMarkdownConverter.getInstance();
       let markdownContent = await converter.convertHTMLToMarkdown(html);
       markdownContent = await postProcessMarkdown(markdownContent);
-      // contextLogger.info(`HTML to Markdown conversion using Go parser successful`);
       return markdownContent;
     }
   } catch (error) {

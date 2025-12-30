@@ -28,14 +28,12 @@ interface ErrorResponse {
 /**
  * Convert HTML to Markdown using direct axios call
  * @param html HTML string to convert
- * @param serviceUrl URL of the HTML to Markdown service (default: http://localhost:8080)
  * @param context Optional context with logger and requestId
  * @returns Markdown string
  * @throws Error if conversion fails
  */
 export async function convertHTMLToMarkdownWithHttpService(
   html: string,
-  serviceUrl?: string,
   context?: {
     logger?: Logger;
     requestId?: string;
@@ -47,7 +45,7 @@ export async function convertHTMLToMarkdownWithHttpService(
 
   const contextLogger = context?.logger || logger;
   const requestId = context?.requestId;
-  const url = serviceUrl || config.HTML_TO_MARKDOWN_SERVICE_URL;
+  const url = config.HTML_TO_MARKDOWN_SERVICE_URL;
   const startTime = Date.now();
 
   try {
