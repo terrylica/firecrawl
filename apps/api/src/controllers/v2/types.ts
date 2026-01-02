@@ -724,7 +724,7 @@ const agentWebhookSchema = z.preprocess(
         .array(
           z.enum(["started", "action", "completed", "failed", "cancelled"]),
         )
-        .prefault(["completed", "failed"]),
+        .prefault(["started", "action", "completed", "failed", "cancelled"]),
     })
     .refine(
       obj => {
