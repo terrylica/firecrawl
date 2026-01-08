@@ -22,6 +22,26 @@ configDotenv();
 const previewTeamId = "3adefd26-77ec-5968-8dcf-c94b5630d1de";
 
 /**
+ * Resolve team_id for logging. If it's a preview team with a UUID suffix,
+ * use that UUID. Otherwise fall back to previewTeamId.
+ */
+function resolveTeamId(teamId: string): string {
+  if (!teamId?.startsWith("preview_") && teamId !== "preview") {
+    return teamId;
+  }
+
+  if (teamId === "preview") {
+    return previewTeamId;
+  }
+
+  const suffix = teamId.slice("preview_".length);
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  return uuidRegex.test(suffix) ? suffix : previewTeamId;
+}
+
+/**
  * Sanitize string fields by removing null bytes (\u0000)
  * PostgreSQL doesn't allow null bytes in text fields
  * This can come from user-provided data like URLs, origin, integration fields
@@ -186,10 +206,7 @@ export async function logRequest(request: LoggedRequest) {
       id: request.id,
       kind: request.kind,
       api_version: request.api_version,
-      team_id:
-        request.team_id === "preview" || request.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : request.team_id,
+      team_id: resolveTeamId(request.team_id),
       origin: sanitizedOrigin,
       integration: sanitizedIntegration,
       target_hint: sanitizedTargetHint,
@@ -241,10 +258,7 @@ export async function logScrape(scrape: LoggedScrape, force: boolean = false) {
       is_successful: scrape.is_successful,
       error: scrape.error ?? null,
       time_taken: scrape.time_taken,
-      team_id:
-        scrape.team_id === "preview" || scrape.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : scrape.team_id,
+      team_id: resolveTeamId(scrape.team_id),
       options: scrape.zeroDataRetention ? null : scrape.options,
       cost_tracking: scrape.zeroDataRetention
         ? null
@@ -334,10 +348,7 @@ export async function logCrawl(crawl: LoggedCrawl, force: boolean = false) {
       url: crawl.zeroDataRetention
         ? "<redacted due to zero data retention>"
         : crawl.url,
-      team_id:
-        crawl.team_id === "preview" || crawl.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : crawl.team_id,
+      team_id: resolveTeamId(crawl.team_id),
       options: crawl.zeroDataRetention ? null : crawl.options,
       num_docs: crawl.num_docs,
       credits_cost: crawl.credits_cost,
@@ -376,11 +387,7 @@ export async function logBatchScrape(
     {
       id: batchScrape.id,
       request_id: batchScrape.request_id,
-      team_id:
-        batchScrape.team_id === "preview" ||
-        batchScrape.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : batchScrape.team_id,
+      team_id: resolveTeamId(batchScrape.team_id),
       num_docs: batchScrape.num_docs,
       credits_cost: batchScrape.credits_cost,
       cancelled: batchScrape.cancelled,
@@ -423,10 +430,7 @@ export async function logSearch(search: LoggedSearch, force: boolean = false) {
       query: search.zeroDataRetention
         ? "<redacted due to zero data retention>"
         : search.query,
-      team_id:
-        search.team_id === "preview" || search.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : search.team_id,
+      team_id: resolveTeamId(search.team_id),
       options: search.zeroDataRetention
         ? { enterprise: search.options?.enterprise }
         : search.options,
@@ -477,10 +481,7 @@ export async function logExtract(
       id: extract.id,
       request_id: extract.request_id,
       urls: extract.urls,
-      team_id:
-        extract.team_id === "preview" || extract.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : extract.team_id,
+      team_id: resolveTeamId(extract.team_id),
       options: extract.options,
       model_kind: extract.model_kind,
       credits_cost: extract.credits_cost,
@@ -531,10 +532,7 @@ export async function logMap(map: LoggedMap, force: boolean = false) {
       url: map.zeroDataRetention
         ? "<redacted due to zero data retention>"
         : map.url,
-      team_id:
-        map.team_id === "preview" || map.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : map.team_id,
+      team_id: resolveTeamId(map.team_id),
       options: map.zeroDataRetention ? null : map.options,
       num_results: map.results.length,
       credits_cost: map.credits_cost,
@@ -578,10 +576,7 @@ export async function logLlmsTxt(
       id: llmsTxt.id,
       request_id: llmsTxt.request_id,
       url: llmsTxt.url,
-      team_id:
-        llmsTxt.team_id === "preview" || llmsTxt.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : llmsTxt.team_id,
+      team_id: resolveTeamId(llmsTxt.team_id),
       options: llmsTxt.options,
       num_urls: llmsTxt.num_urls,
       credits_cost: llmsTxt.credits_cost,
@@ -626,11 +621,7 @@ export async function logDeepResearch(
       id: deepResearch.id,
       request_id: deepResearch.request_id,
       query: deepResearch.query,
-      team_id:
-        deepResearch.team_id === "preview" ||
-        deepResearch.team_id?.startsWith("preview_")
-          ? previewTeamId
-          : deepResearch.team_id,
+      team_id: resolveTeamId(deepResearch.team_id),
       options: deepResearch.options,
       time_taken: deepResearch.time_taken,
       credits_cost: deepResearch.credits_cost,
