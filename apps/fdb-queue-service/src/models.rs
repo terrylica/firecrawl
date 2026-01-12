@@ -18,6 +18,15 @@ pub struct FdbQueueJob {
     pub team_id: String,
 }
 
+/// Response for pop_next_job - includes the queue key for later completion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimedJob {
+    pub job: FdbQueueJob,
+    /// Base64-encoded queue key for completing the job
+    pub queue_key: String,
+}
+
 // === Request types ===
 
 #[derive(Debug, Deserialize)]
@@ -46,10 +55,19 @@ pub struct JobInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopJobRequest {
+    /// Unique worker ID claiming the job
+    pub worker_id: String,
     /// List of crawl IDs that are currently at concurrency limit
     /// These crawls should be skipped when popping
     #[serde(default)]
     pub blocked_crawl_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteJobRequest {
+    /// Base64-encoded queue key
+    pub queue_key: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -8,6 +8,7 @@ import {
   isFDBConfigured,
   cleanExpiredJobs,
   cleanExpiredActiveJobs,
+  cleanOrphanedClaims,
   sampleTeamCounters,
   sampleCrawlCounters,
   reconcileTeamQueueCounter,
@@ -237,11 +238,17 @@ async function runFDBCleanup(): Promise<void> {
   try {
     const expiredJobsRemoved = await cleanExpiredJobs();
     const expiredActiveJobsRemoved = await cleanExpiredActiveJobs();
+    const orphanedClaimsRemoved = await cleanOrphanedClaims();
 
-    if (expiredJobsRemoved > 0 || expiredActiveJobsRemoved > 0) {
+    if (
+      expiredJobsRemoved > 0 ||
+      expiredActiveJobsRemoved > 0 ||
+      orphanedClaimsRemoved > 0
+    ) {
       logger.info("FDB cleanup completed", {
         expiredJobsRemoved,
         expiredActiveJobsRemoved,
+        orphanedClaimsRemoved,
         durationMs: Date.now() - startTime,
       });
     }

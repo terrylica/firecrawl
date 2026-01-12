@@ -55,14 +55,25 @@ pub async fn pop_next_job(
     State(state): State<AppState>,
     Path(team_id): Path<String>,
     Json(req): Json<PopJobRequest>,
-) -> ApiResult<Option<FdbQueueJob>> {
+) -> ApiResult<Option<ClaimedJob>> {
     let blocked_crawl_ids: HashSet<String> = req.blocked_crawl_ids.into_iter().collect();
 
-    let job = state.fdb.pop_next_job(&team_id, &blocked_crawl_ids)
+    let job = state.fdb.pop_next_job(&team_id, &req.worker_id, &blocked_crawl_ids)
         .await
         .map_err(internal_error)?;
 
     Ok(Json(job))
+}
+
+pub async fn complete_job(
+    State(state): State<AppState>,
+    Json(req): Json<CompleteJobRequest>,
+) -> ApiResult<SuccessResponse> {
+    let success = state.fdb.complete_job(&req.queue_key)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(SuccessResponse { success }))
 }
 
 pub async fn get_team_queue_count(
@@ -207,6 +218,16 @@ pub async fn clean_stale_counters(
     State(state): State<AppState>,
 ) -> ApiResult<CleanupResponse> {
     let cleaned = state.fdb.clean_stale_counters()
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(CleanupResponse { cleaned }))
+}
+
+pub async fn clean_orphaned_claims(
+    State(state): State<AppState>,
+) -> ApiResult<CleanupResponse> {
+    let cleaned = state.fdb.clean_orphaned_claims()
         .await
         .map_err(internal_error)?;
 

@@ -242,13 +242,20 @@ async function getNextConcurrentJob(teamId: string): Promise<{
     return currentActiveConcurrency < maxCrawlConcurrency;
   };
 
-  const fdbJob = await fdbQueue.popNextJob(teamId, crawlConcurrencyChecker);
+  const claimed = await fdbQueue.popNextJob(teamId, crawlConcurrencyChecker);
 
-  if (fdbJob === null) {
+  if (claimed === null) {
     return null;
   }
 
-  logger.debug("Removed job from concurrency limit queue (FDB)", {
+  const fdbJob = claimed.job;
+
+  // Complete the job immediately - we're promoting it from FDB backlog to main queue
+  // The versionstamp claiming ensures only one worker successfully claims the job,
+  // so completing it now is safe and removes it from the FDB queue.
+  await fdbQueue.completeJob(claimed.queueKey);
+
+  logger.debug("Claimed and completed job from concurrency limit queue (FDB)", {
     teamId,
     jobId: fdbJob.id,
     priority: fdbJob.priority,

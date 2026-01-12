@@ -24,6 +24,15 @@ type FDBQueueJob = {
   teamId: string;
 };
 
+// Claimed job returned by pop - includes queue key for later completion
+type ClaimedJob = {
+  job: FDBQueueJob;
+  queueKey: string;
+};
+
+// Generate a unique worker ID for this process
+const workerId = `worker-${process.pid}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
 // Circuit breaker state for FDB service health
 type CircuitState = "closed" | "open" | "half-open";
 let circuitState: CircuitState = "closed";
@@ -158,20 +167,34 @@ export async function pushJob(
   });
 }
 
+/**
+ * Pop the next available job from the queue.
+ *
+ * Uses conflict-free versionstamp claims:
+ * 1. The service claims a job by writing to a unique versionstamp key
+ * 2. Returns a ClaimedJob with job data and a queueKey for completion
+ * 3. After processing, call completeJob(queueKey) to remove the job
+ *
+ * If a worker crashes after claiming but before completing, the orphaned
+ * claim will be cleaned up by the janitor, allowing another worker to claim.
+ */
 export async function popNextJob(
   teamId: string,
   crawlConcurrencyChecker?: (crawlId: string) => Promise<boolean>,
-): Promise<FDBQueueJob | null> {
-  // Get blocked crawl IDs first
-  const blockedCrawlIds: string[] = [];
+): Promise<ClaimedJob | null> {
+  // Try without blocking any crawls first
+  return popNextJobWithBlocking(teamId, [], crawlConcurrencyChecker);
+}
 
-  // We need to check crawl concurrency on the client side since it requires
-  // access to Redis for crawl info. The service handles the atomic pop operation.
-  // First, let's try without blocking any crawls
-  const result = await httpRequest<FDBQueueJob | null>(
+async function popNextJobWithBlocking(
+  teamId: string,
+  blockedCrawlIds: string[],
+  crawlConcurrencyChecker?: (crawlId: string) => Promise<boolean>,
+): Promise<ClaimedJob | null> {
+  const result = await httpRequest<ClaimedJob | null>(
     "POST",
     `/queue/pop/${encodeURIComponent(teamId)}`,
-    { blockedCrawlIds: [] },
+    { workerId, blockedCrawlIds },
   );
 
   if (result === null) {
@@ -180,78 +203,52 @@ export async function popNextJob(
 
   // If there's a crawl concurrency checker and the job has a crawl ID,
   // we need to verify concurrency is OK
-  if (result.crawlId && crawlConcurrencyChecker) {
-    const canRun = await crawlConcurrencyChecker(result.crawlId);
+  if (result.job.crawlId && crawlConcurrencyChecker) {
+    const canRun = await crawlConcurrencyChecker(result.job.crawlId);
     if (!canRun) {
-      // Unfortunately, we already popped the job.
-      // We need to push it back and try again with the blocked list.
-      // This is a simplification - in production you'd want to handle this better.
-      await pushJob(
+      // We claimed this job but can't run it due to crawl concurrency.
+      // We need to complete it (remove our claim) and try again with this crawl blocked.
+      // Note: This is safe because we're the only ones who claimed this job.
+      // We'll "abandon" our claim by not completing, and the janitor will clean it up.
+      // Actually, we should just try again with the blocked list - the service
+      // will skip jobs from blocked crawls.
+      logger.debug("Skipping claimed job due to crawl concurrency limit", {
         teamId,
-        {
-          id: result.id,
-          data: result.data,
-          priority: result.priority,
-          listenable: result.listenable,
-          listenChannelId: result.listenChannelId,
-        },
-        result.timesOutAt ? result.timesOutAt - Date.now() : Infinity,
-        result.crawlId,
-      );
+        jobId: result.job.id,
+        crawlId: result.job.crawlId,
+      });
 
+      // The job stays claimed by us but we won't process it.
+      // This is suboptimal but safe - the claim will be cleaned up by janitor.
       // Try again with this crawl blocked
-      return popNextJobWithBlocking(
-        teamId,
-        [result.crawlId],
-        crawlConcurrencyChecker,
-      );
+      if (!blockedCrawlIds.includes(result.job.crawlId)) {
+        return popNextJobWithBlocking(
+          teamId,
+          [...blockedCrawlIds, result.job.crawlId],
+          crawlConcurrencyChecker,
+        );
+      }
+      return null;
     }
   }
 
   return result;
 }
 
-async function popNextJobWithBlocking(
-  teamId: string,
-  blockedCrawlIds: string[],
-  crawlConcurrencyChecker: (crawlId: string) => Promise<boolean>,
-): Promise<FDBQueueJob | null> {
-  const result = await httpRequest<FDBQueueJob | null>(
+/**
+ * Complete a job after successful processing.
+ * This removes the job from the queue and cleans up all claims.
+ *
+ * @param queueKey The base64-encoded queue key from the ClaimedJob
+ * @returns true if the job was completed, false if it was already gone
+ */
+export async function completeJob(queueKey: string): Promise<boolean> {
+  const result = await httpRequest<{ success: boolean }>(
     "POST",
-    `/queue/pop/${encodeURIComponent(teamId)}`,
-    { blockedCrawlIds },
+    "/queue/complete",
+    { queueKey },
   );
-
-  if (result === null) {
-    return null;
-  }
-
-  // Check concurrency again for any new crawl ID
-  if (result.crawlId && !blockedCrawlIds.includes(result.crawlId)) {
-    const canRun = await crawlConcurrencyChecker(result.crawlId);
-    if (!canRun) {
-      await pushJob(
-        teamId,
-        {
-          id: result.id,
-          data: result.data,
-          priority: result.priority,
-          listenable: result.listenable,
-          listenChannelId: result.listenChannelId,
-        },
-        result.timesOutAt ? result.timesOutAt - Date.now() : Infinity,
-        result.crawlId,
-      );
-
-      return popNextJobWithBlocking(
-        teamId,
-        [...blockedCrawlIds, result.crawlId],
-        crawlConcurrencyChecker,
-      );
-    }
-  }
-
-  return result;
+  return result.success;
 }
 
 export async function getTeamQueueCount(teamId: string): Promise<number> {
@@ -375,6 +372,14 @@ export async function cleanStaleCounters(): Promise<number> {
   const result = await httpRequest<{ cleaned: number }>(
     "POST",
     "/cleanup/stale-counters",
+  );
+  return result.cleaned;
+}
+
+export async function cleanOrphanedClaims(): Promise<number> {
+  const result = await httpRequest<{ cleaned: number }>(
+    "POST",
+    "/cleanup/orphaned-claims",
   );
   return result.cleaned;
 }

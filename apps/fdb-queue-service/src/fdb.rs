@@ -1,8 +1,9 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use foundationdb::{Database, RangeOption, TransactionCommitError, options::MutationType};
 use std::collections::HashSet;
 use thiserror::Error;
 
-use crate::models::FdbQueueJob;
+use crate::models::{FdbQueueJob, ClaimedJob};
 
 // Subspace prefixes (matching the TypeScript implementation)
 const QUEUE_PREFIX: &[u8] = &[0x01];
@@ -11,6 +12,10 @@ const COUNTER_PREFIX: &[u8] = &[0x03];
 const ACTIVE_PREFIX: &[u8] = &[0x04];
 const ACTIVE_CRAWL_PREFIX: &[u8] = &[0x05];
 const TTL_INDEX_PREFIX: &[u8] = &[0x06];
+const CLAIMS_PREFIX: &[u8] = &[0x07];
+
+// Versionstamp placeholder (10 bytes: 8 for versionstamp + 2 for user version)
+const VERSIONSTAMP_PLACEHOLDER: [u8; 10] = [0xff; 10];
 
 // Counter types
 const COUNTER_TEAM: &[u8] = &[0x01];
@@ -45,14 +50,6 @@ impl FdbQueue {
     }
 
     // === Key building helpers ===
-
-    fn build_key(parts: &[&[u8]]) -> Vec<u8> {
-        let mut key = Vec::new();
-        for part in parts {
-            key.extend_from_slice(part);
-        }
-        key
-    }
 
     fn build_queue_key(team_id: &str, priority: i32, created_at: i64, job_id: &str) -> Vec<u8> {
         let mut key = QUEUE_PREFIX.to_vec();
@@ -169,6 +166,28 @@ impl FdbQueue {
         key
     }
 
+    /// Build a claim key with versionstamp placeholder.
+    /// Key format: CLAIMS_PREFIX + job_id_len(4) + job_id + versionstamp(10)
+    /// Returns (key_with_placeholder, offset_of_versionstamp)
+    fn build_claim_key_with_versionstamp(job_id: &str) -> (Vec<u8>, usize) {
+        let mut key = CLAIMS_PREFIX.to_vec();
+        let job_bytes = job_id.as_bytes();
+        key.extend_from_slice(&(job_bytes.len() as u32).to_be_bytes());
+        key.extend_from_slice(job_bytes);
+        let versionstamp_offset = key.len();
+        key.extend_from_slice(&VERSIONSTAMP_PLACEHOLDER);
+        (key, versionstamp_offset)
+    }
+
+    /// Build prefix for all claims of a job.
+    fn build_claims_prefix(job_id: &str) -> Vec<u8> {
+        let mut key = CLAIMS_PREFIX.to_vec();
+        let job_bytes = job_id.as_bytes();
+        key.extend_from_slice(&(job_bytes.len() as u32).to_be_bytes());
+        key.extend_from_slice(job_bytes);
+        key
+    }
+
     // === Encoding helpers ===
 
     fn encode_i64_le(n: i64) -> [u8; 8] {
@@ -282,119 +301,330 @@ impl FdbQueue {
         Ok(())
     }
 
+    /// Pop the next available job using conflict-free versionstamp claims.
+    ///
+    /// This uses append-only claims with versionstamps for ZERO conflicts:
+    /// 1. Snapshot read jobs (no conflict established)
+    /// 2. For each candidate, blind write to claims/{job_id}/{versionstamp}
+    /// 3. Versionstamps are unique per transaction, so writes CANNOT conflict
+    /// 4. Lowest versionstamp wins - that worker owns the job
     pub async fn pop_next_job(
         &self,
         team_id: &str,
+        worker_id: &str,
         blocked_crawl_ids: &HashSet<String>,
-    ) -> Result<Option<FdbQueueJob>, FdbError> {
+    ) -> Result<Option<ClaimedJob>, FdbError> {
         let now = Self::now_ms();
         let start_key = Self::build_queue_prefix(team_id);
         let end_key = Self::end_key(&start_key);
 
-        for _attempt in 0..100 {
-            // Read candidates
+        // Read candidates with snapshot read (no read conflicts)
+        let trx = self.db.create_trx()?;
+        let range = trx.get_range(
+            &RangeOption::from((&start_key[..], &end_key[..])),
+            100,
+            true, // snapshot = true (no read conflicts)
+        ).await?;
+
+        if range.is_empty() {
+            return Ok(None);
+        }
+
+        // Collect candidates into Vec to avoid holding FdbKeyValue iterator
+        let mut candidates: Vec<(Vec<u8>, FdbQueueJob)> = Vec::new();
+        let mut expired_jobs: Vec<(Vec<u8>, FdbQueueJob)> = Vec::new();
+
+        for kv in range.iter() {
+            if let Ok(job) = serde_json::from_slice::<FdbQueueJob>(kv.value()) {
+                // Skip expired jobs
+                if let Some(times_out_at) = job.times_out_at {
+                    if times_out_at < now {
+                        expired_jobs.push((kv.key().to_vec(), job));
+                        continue;
+                    }
+                }
+
+                // Skip blocked crawls
+                if let Some(ref cid) = job.crawl_id {
+                    if blocked_crawl_ids.contains(cid) {
+                        continue;
+                    }
+                }
+
+                candidates.push((kv.key().to_vec(), job));
+            }
+        }
+
+        // Clean up expired jobs in a separate transaction (best effort)
+        if !expired_jobs.is_empty() {
+            let cleanup_trx = self.db.create_trx()?;
+            for (key, job) in &expired_jobs {
+                cleanup_trx.clear(key);
+                let team_counter_key = Self::build_counter_key(COUNTER_TEAM, team_id);
+                cleanup_trx.atomic_op(&team_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+
+                if let Some(times_out_at) = job.times_out_at {
+                    let ttl_key = Self::build_ttl_index_key(times_out_at, team_id, &job.id);
+                    cleanup_trx.clear(&ttl_key);
+                }
+
+                if let Some(ref cid) = job.crawl_id {
+                    cleanup_trx.clear(&Self::build_crawl_index_key(cid, &job.id));
+                    let crawl_counter_key = Self::build_counter_key(COUNTER_CRAWL, cid);
+                    cleanup_trx.atomic_op(&crawl_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+                }
+            }
+            // Best effort - ignore errors
+            let _ = cleanup_trx.commit().await;
+        }
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        // Try to claim each candidate in priority order
+        for (queue_key, job) in candidates {
+            // Check if job already has claims (snapshot read)
+            let claims_prefix = Self::build_claims_prefix(&job.id);
+            let claims_end = Self::end_key(&claims_prefix);
+
+            let check_trx = self.db.create_trx()?;
+            let existing_claims = check_trx.get_range(
+                &RangeOption::from((&claims_prefix[..], &claims_end[..])),
+                1,
+                true, // snapshot
+            ).await?;
+
+            // If there are existing claims, this job is already being contested
+            // Skip to next candidate to avoid wasted effort
+            if !existing_claims.is_empty() {
+                continue;
+            }
+
+            // Submit our claim with versionstamp (CANNOT conflict!)
+            let claim_trx = self.db.create_trx()?;
+            let (claim_key, _versionstamp_offset) = Self::build_claim_key_with_versionstamp(&job.id);
+
+            // Also store the queue_key in the claim value so we can find the job later
+            let claim_value = serde_json::json!({
+                "workerId": worker_id,
+                "queueKey": BASE64.encode(&queue_key),
+                "claimedAt": now,
+            });
+            claim_trx.atomic_op(
+                &claim_key,
+                &serde_json::to_vec(&claim_value)?,
+                MutationType::SetVersionstampedKey,
+            );
+
+            // Commit our claim - this CANNOT conflict because versionstamp makes key unique
+            claim_trx.commit().await?;
+
+            // Now read all claims to see who won (lowest versionstamp)
+            let verify_trx = self.db.create_trx()?;
+            let all_claims = verify_trx.get_range(
+                &RangeOption::from((&claims_prefix[..], &claims_end[..])),
+                10,
+                true, // snapshot
+            ).await?;
+
+            if all_claims.is_empty() {
+                // Shouldn't happen since we just wrote one, but handle gracefully
+                continue;
+            }
+
+            // Claims are ordered by versionstamp (part of key), so first one wins
+            let winning_claim = all_claims.iter().next().unwrap();
+            let winning_value: serde_json::Value = serde_json::from_slice(winning_claim.value())?;
+
+            if winning_value["workerId"].as_str() == Some(worker_id) {
+                // We won! Return the job
+                tracing::debug!(
+                    "Won claim for job {} (worker {})",
+                    job.id,
+                    worker_id
+                );
+
+                return Ok(Some(ClaimedJob {
+                    job,
+                    queue_key: BASE64.encode(&queue_key),
+                }));
+            } else {
+                // We lost, try next candidate
+                tracing::debug!(
+                    "Lost claim for job {} to worker {:?}",
+                    job.id,
+                    winning_value["workerId"].as_str()
+                );
+                continue;
+            }
+        }
+
+        // No candidates were successfully claimed
+        Ok(None)
+    }
+
+    /// Complete a job after successful processing.
+    /// This deletes the job from the queue and cleans up all claims.
+    ///
+    /// The queue_key is the base64-encoded queue key returned by pop_next_job.
+    pub async fn complete_job(&self, queue_key_b64: &str) -> Result<bool, FdbError> {
+        // Decode the queue key
+        let queue_key = BASE64.decode(queue_key_b64)
+            .map_err(|e| FdbError::Other(format!("Invalid queue key: {}", e)))?;
+
+        // First, read the job to get its metadata
+        let trx = self.db.create_trx()?;
+        let job_data = trx.get(&queue_key, false).await?;
+
+        let Some(job_bytes) = job_data else {
+            // Job doesn't exist, might have been cleaned up already
+            return Ok(false);
+        };
+
+        let job: FdbQueueJob = serde_json::from_slice(&job_bytes)?;
+
+        // Delete the job and update counters in a single transaction
+        let trx = self.db.create_trx()?;
+
+        // Delete the job from the queue
+        trx.clear(&queue_key);
+
+        // Decrement team counter
+        let team_counter_key = Self::build_counter_key(COUNTER_TEAM, &job.team_id);
+        trx.atomic_op(&team_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+
+        // Clean up TTL index if it exists
+        if let Some(times_out_at) = job.times_out_at {
+            let ttl_key = Self::build_ttl_index_key(times_out_at, &job.team_id, &job.id);
+            trx.clear(&ttl_key);
+        }
+
+        // Clean up crawl index and counter if applicable
+        if let Some(ref crawl_id) = job.crawl_id {
+            trx.clear(&Self::build_crawl_index_key(crawl_id, &job.id));
+            let crawl_counter_key = Self::build_counter_key(COUNTER_CRAWL, crawl_id);
+            trx.atomic_op(&crawl_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+        }
+
+        // Clean up all claims for this job
+        let claims_prefix = Self::build_claims_prefix(&job.id);
+        let claims_end = Self::end_key(&claims_prefix);
+        trx.clear_range(&claims_prefix, &claims_end);
+
+        trx.commit().await?;
+
+        tracing::debug!(
+            job_id = job.id,
+            team_id = job.team_id,
+            "Completed job and cleaned up claims"
+        );
+
+        Ok(true)
+    }
+
+    /// Clean up orphaned claims - claims for jobs that no longer exist.
+    /// This should be run periodically by the janitor.
+    ///
+    /// Returns the number of orphaned claims cleaned up.
+    pub async fn clean_orphaned_claims(&self) -> Result<i64, FdbError> {
+        let mut cleaned = 0i64;
+
+        // Scan all claims
+        let claims_start = CLAIMS_PREFIX.to_vec();
+        let claims_end = Self::end_key(&claims_start);
+
+        for _ in 0..10 {
             let trx = self.db.create_trx()?;
             let range = trx.get_range(
-                &RangeOption::from((&start_key[..], &end_key[..])),
-                50,
+                &RangeOption::from((&claims_start[..], &claims_end[..])),
+                100,
                 false,
             ).await?;
 
             if range.is_empty() {
-                return Ok(None);
-            }
-
-            let mut candidates: Vec<(Vec<u8>, FdbQueueJob)> = Vec::new();
-            for kv in range.iter() {
-                if let Ok(job) = serde_json::from_slice::<FdbQueueJob>(kv.value()) {
-                    candidates.push((kv.key().to_vec(), job));
-                }
-            }
-
-            if candidates.is_empty() {
-                return Ok(None);
-            }
-
-            // Find first valid job
-            let mut selected: Option<(Vec<u8>, FdbQueueJob)> = None;
-            let mut expired_jobs: Vec<(Vec<u8>, FdbQueueJob)> = Vec::new();
-            let mut skipped_due_to_concurrency = 0;
-
-            for (key, job) in candidates {
-                if let Some(times_out_at) = job.times_out_at {
-                    if times_out_at < now {
-                        expired_jobs.push((key, job));
-                        continue;
-                    }
-                }
-
-                if let Some(ref cid) = job.crawl_id {
-                    if blocked_crawl_ids.contains(cid) {
-                        skipped_due_to_concurrency += 1;
-                        continue;
-                    }
-                }
-
-                selected = Some((key, job));
                 break;
             }
 
-            // Atomic removal
-            let trx = self.db.create_trx()?;
+            let batch_count = range.len();
 
-            for (key, job) in &expired_jobs {
-                if trx.get(key, false).await?.is_some() {
-                    trx.clear(key);
-                    let team_counter_key = Self::build_counter_key(COUNTER_TEAM, team_id);
-                    trx.atomic_op(&team_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+            // Collect claims with their keys, job IDs, and parsed values upfront
+            // (to avoid holding FdbKeyValue iterator across await points)
+            struct ClaimInfo {
+                claim_key: Vec<u8>,
+                queue_key: Option<Vec<u8>>,
+            }
+            let mut claims_to_check: Vec<ClaimInfo> = Vec::new();
 
-                    if let Some(times_out_at) = job.times_out_at {
-                        let ttl_key = Self::build_ttl_index_key(times_out_at, team_id, &job.id);
-                        trx.clear(&ttl_key);
-                    }
+            for kv in range.iter() {
+                let key = kv.key();
+                // Key format: CLAIMS_PREFIX + job_id_len(4) + job_id + versionstamp(10)
+                if key.len() > 5 + 10 {
+                    let job_id_len = u32::from_be_bytes([key[1], key[2], key[3], key[4]]) as usize;
+                    if key.len() >= 5 + job_id_len + 10 {
+                        // Parse the claim value to get queue key
+                        let queue_key = serde_json::from_slice::<serde_json::Value>(kv.value())
+                            .ok()
+                            .and_then(|v| v["queueKey"].as_str().map(String::from))
+                            .and_then(|b64| BASE64.decode(&b64).ok());
 
-                    if let Some(ref cid) = job.crawl_id {
-                        trx.clear(&Self::build_crawl_index_key(cid, &job.id));
-                        let crawl_counter_key = Self::build_counter_key(COUNTER_CRAWL, cid);
-                        trx.atomic_op(&crawl_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+                        claims_to_check.push(ClaimInfo {
+                            claim_key: key.to_vec(),
+                            queue_key,
+                        });
                     }
                 }
             }
 
-            if let Some((key, job)) = selected.clone() {
-                if trx.get(&key, false).await?.is_some() {
-                    trx.clear(&key);
-                    let team_counter_key = Self::build_counter_key(COUNTER_TEAM, team_id);
-                    trx.atomic_op(&team_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+            if claims_to_check.is_empty() {
+                break;
+            }
 
-                    if let Some(times_out_at) = job.times_out_at {
-                        let ttl_key = Self::build_ttl_index_key(times_out_at, team_id, &job.id);
-                        trx.clear(&ttl_key);
+            // Check each claim's corresponding job
+            let check_trx = self.db.create_trx()?;
+            let mut orphans: Vec<Vec<u8>> = Vec::new();
+
+            for claim in &claims_to_check {
+                match &claim.queue_key {
+                    Some(queue_key) => {
+                        // Check if job still exists (use snapshot read)
+                        if check_trx.get(queue_key, true).await?.is_none() {
+                            orphans.push(claim.claim_key.clone());
+                        }
                     }
-
-                    if let Some(ref cid) = job.crawl_id {
-                        trx.clear(&Self::build_crawl_index_key(cid, &job.id));
-                        let crawl_counter_key = Self::build_counter_key(COUNTER_CRAWL, cid);
-                        trx.atomic_op(&crawl_counter_key, &Self::encode_i64_le(-1), MutationType::Add);
+                    None => {
+                        // No valid queue key, consider it orphaned
+                        orphans.push(claim.claim_key.clone());
                     }
-
-                    trx.commit().await?;
-                    return Ok(Some(job));
                 }
             }
 
-            trx.commit().await?;
-
-            if selected.is_none() && skipped_due_to_concurrency == 0 {
-                return Ok(None);
+            if orphans.is_empty() {
+                if batch_count < 100 {
+                    break;
+                }
+                continue;
             }
 
-            // Backoff before retry
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            // Clean up orphaned claims
+            let cleanup_trx = self.db.create_trx()?;
+            for orphan_key in &orphans {
+                cleanup_trx.clear(orphan_key);
+            }
+            cleanup_trx.commit().await?;
+
+            cleaned += orphans.len() as i64;
+
+            if batch_count < 100 {
+                break;
+            }
         }
 
-        tracing::error!("Failed to pop job after 100 attempts for team {}", team_id);
-        Ok(None)
+        if cleaned > 0 {
+            tracing::info!(cleaned = cleaned, "Cleaned orphaned claims");
+        }
+
+        Ok(cleaned)
     }
 
     pub async fn get_team_queue_count(&self, team_id: &str) -> Result<i64, FdbError> {

@@ -64,6 +64,7 @@ async fn async_main(_network: foundationdb::api::NetworkAutoStop) -> Result<(), 
         // Queue operations
         .route("/queue/push", post(handlers::push_job))
         .route("/queue/pop/:team_id", post(handlers::pop_next_job))
+        .route("/queue/complete", post(handlers::complete_job))
         .route("/queue/count/team/:team_id", get(handlers::get_team_queue_count))
         .route("/queue/count/crawl/:crawl_id", get(handlers::get_crawl_queue_count))
         .route("/queue/jobs/team/:team_id", get(handlers::get_team_queued_job_ids))
@@ -83,6 +84,7 @@ async fn async_main(_network: foundationdb::api::NetworkAutoStop) -> Result<(), 
         .route("/cleanup/expired-jobs", post(handlers::clean_expired_jobs))
         .route("/cleanup/expired-active-jobs", post(handlers::clean_expired_active_jobs))
         .route("/cleanup/stale-counters", post(handlers::clean_stale_counters))
+        .route("/cleanup/orphaned-claims", post(handlers::clean_orphaned_claims))
 
         // Counter reconciliation
         .route("/reconcile/team/queue/:team_id", post(handlers::reconcile_team_queue_counter))
