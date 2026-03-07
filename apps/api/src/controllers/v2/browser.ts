@@ -38,8 +38,8 @@ function calculateBrowserSessionCredits(durationMs: number): number {
 // ---------------------------------------------------------------------------
 
 const browserCreateRequestSchema = z.object({
-  ttl: z.number().min(30).max(3600).default(300),
-  activityTtl: z.number().min(10).max(3600).default(120),
+  ttl: z.number().min(30).max(3600).default(600),
+  activityTtl: z.number().min(10).max(3600).default(300),
   streamWebView: z.boolean().default(true),
   origin: z.string().optional(),
   profile: z
@@ -66,6 +66,7 @@ const browserExecuteRequestSchema = z.object({
   code: z.string().min(1).max(100_000),
   language: z.enum(["python", "node", "bash"]).default("node"),
   timeout: z.number().min(1).max(300).default(30),
+  origin: z.string().optional(),
 });
 
 type BrowserExecuteRequest = z.infer<typeof browserExecuteRequestSchema>;
@@ -395,7 +396,7 @@ export async function browserExecuteController(
   req.body = browserExecuteRequestSchema.parse(req.body);
 
   const id = req.params.sessionId;
-  const { code, language, timeout } = req.body;
+  const { code, language, timeout, origin } = req.body;
 
   const logger = _logger.child({
     sessionId: id,
@@ -439,7 +440,7 @@ export async function browserExecuteController(
     execResult = await browserServiceRequest<BrowserServiceExecResponse>(
       "POST",
       `/browsers/${session.browser_id}/exec`,
-      { code, language, timeout },
+      { code, language, timeout, origin },
     );
   } catch (err) {
     logger.error("Failed to execute code via browser service", { error: err });
