@@ -565,6 +565,7 @@ export async function browserDeleteController(
     req.acuc?.sub_id ?? undefined,
     creditsBilled,
     req.acuc?.api_key_id ?? null,
+    { endpoint: "browser" },
   ).catch(error => {
     logger.error("Failed to bill team for browser session", {
       error,
@@ -691,6 +692,7 @@ export async function browserWebhookDestroyedController(
     undefined, // subscription_id — billTeam will look it up
     creditsBilled,
     null, // api_key_id not available in webhook context
+    { endpoint: "browser" },
   ).catch(error => {
     logger.error("Failed to bill team for browser session via webhook", {
       error,
