@@ -35,6 +35,7 @@ export function runSelfHostedOCRExperiment(
   base64Content: string,
   muV1Result: { markdown: string; durationMs: number },
   maxPages?: number,
+  pagesProcessed?: number,
 ): void {
   if (
     !config.PDF_OCR_EXPERIMENT_ENABLE ||
@@ -56,28 +57,40 @@ export function runSelfHostedOCRExperiment(
           : undefined,
         body: {
           pdf: base64Content,
+          scrape_id: meta.id,
           ...(maxPages !== undefined && { max_pages: maxPages }),
         },
         logger,
         schema: z.object({
           markdown: z.string(),
           failed_pages: z.array(z.number()).nullable(),
+          pages_processed: z.number().optional(),
         }),
         mock: meta.mock,
         abort: meta.abort.asSignal(),
       });
       const ocrDurationMs = Date.now() - startedAt;
       const similarity = wordSimilarity(resp.markdown, muV1Result.markdown);
+      const pages = resp.pages_processed ?? pagesProcessed;
+      const timeDiffMs = muV1Result.durationMs - ocrDurationMs;
+      const speedup = muV1Result.durationMs > 0 && ocrDurationMs > 0
+        ? Math.round((muV1Result.durationMs / ocrDurationMs) * 100) / 100
+        : undefined;
 
       logger.info("Self-hosted OCR experiment completed", {
         scrapeId: meta.id,
         url: meta.rewrittenUrl ?? meta.url,
         ocrDurationMs,
         muV1DurationMs: muV1Result.durationMs,
+        timeDiffMs,
+        speedup,
         ocrMarkdownLength: resp.markdown.length,
         muV1MarkdownLength: muV1Result.markdown.length,
         wordSimilarity: Math.round(similarity * 1000) / 1000,
         failedPages: resp.failed_pages,
+        pagesProcessed: pages,
+        ocrPerPageMs: pages ? Math.round(ocrDurationMs / pages) : undefined,
+        muV1PerPageMs: pages ? Math.round(muV1Result.durationMs / pages) : undefined,
       });
     } catch {
       // Non-blocking: instance may be down at any time, silently skip
